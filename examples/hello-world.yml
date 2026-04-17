@@ -8,3 +8,9 @@ tools:
     description: Get the current time in a human-readable format.
     sh: |
       date +"%Y-%m-%d %H:%M:%S"
+  - name: greet
+    description: Return a friendly greeting addressed to the given name.
+    params:
+      who: string!
+    sh: |
+      echo "Hello, $who!"

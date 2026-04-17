@@ -28,7 +28,7 @@ type Runtime struct {
 func New(ctx context.Context, b *bot.Bot, llm adkmodel.LLM) (*Runtime, error) {
 	tools := make([]adktool.Tool, 0, len(b.Tools))
 	for _, t := range b.Tools {
-		built, err := tool.NewShell(t.Name, t.Description, t.Sh)
+		built, err := tool.NewShell(t.Name, t.Description, t.Sh, t.Params)
 		if err != nil {
 			return nil, fmt.Errorf("tool %q: %w", t.Name, err)
 		}

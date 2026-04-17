@@ -7,6 +7,7 @@ require (
 	github.com/charmbracelet/bubbles v1.0.0
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/charmbracelet/lipgloss v1.1.0
+	github.com/google/jsonschema-go v0.4.2
 	google.golang.org/adk v1.1.0
 	google.golang.org/genai v1.54.0
 	gopkg.in/yaml.v3 v3.0.1
@@ -33,7 +34,6 @@ require (
 	github.com/go-logr/logr v1.4.3 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/google/go-cmp v0.7.0 // indirect
-	github.com/google/jsonschema-go v0.4.2 // indirect
 	github.com/google/s2a-go v0.1.9 // indirect
 	github.com/google/safehtml v0.1.0 // indirect
 	github.com/google/uuid v1.6.0 // indirect
