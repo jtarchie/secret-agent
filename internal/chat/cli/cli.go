@@ -26,10 +26,10 @@ func (t *Transport) Run(ctx context.Context, botName string, h chat.Handler) err
 	return err
 }
 
-type botReply struct {
-	text string
-	err  error
-}
+type (
+	chunkMsg      chat.Chunk
+	streamDoneMsg struct{}
+)
 
 type model struct {
 	ctx      context.Context
@@ -41,6 +41,10 @@ type model struct {
 	waiting  bool
 	width    int
 	height   int
+
+	stream   <-chan chat.Chunk
+	replyIdx int
+	replyBuf strings.Builder
 
 	userStyle   lipgloss.Style
 	botStyle    lipgloss.Style
@@ -62,6 +66,7 @@ func newModel(ctx context.Context, botName string, h chat.Handler) *model {
 		handler:     h,
 		viewport:    vp,
 		input:       ti,
+		replyIdx:    -1,
 		userStyle:   lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("6")),
 		botStyle:    lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("5")),
 		errorStyle:  lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("9")),
@@ -98,19 +103,35 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.input.Reset()
 			m.appendLine(m.userStyle.Render("you") + ": " + text)
-			m.waiting = true
 			m.appendLine(m.statusStyle.Render("…thinking"))
-			return m, m.askBot(text)
+			m.replyIdx = len(m.history) - 1
+			m.replyBuf.Reset()
+			m.stream = m.handler(m.ctx, text)
+			m.waiting = true
+			return m, waitForChunk(m.stream)
 		}
 
-	case botReply:
-		m.dropLastLine()
-		if msg.err != nil {
-			m.appendLine(m.errorStyle.Render("error") + ": " + msg.err.Error())
-		} else {
-			m.appendLine(m.botStyle.Render(m.botName) + ": " + msg.text)
+	case chunkMsg:
+		if msg.Err != nil {
+			m.history[m.replyIdx] = m.errorStyle.Render("error") + ": " + msg.Err.Error()
+			m.refreshViewport()
+			return m, waitForChunk(m.stream)
+		}
+		m.replyBuf.WriteString(msg.Delta)
+		m.history[m.replyIdx] = m.botStyle.Render(m.botName) + ": " + m.replyBuf.String()
+		m.refreshViewport()
+		return m, waitForChunk(m.stream)
+
+	case streamDoneMsg:
+		if m.replyBuf.Len() == 0 && m.replyIdx >= 0 && m.replyIdx < len(m.history) &&
+			strings.Contains(m.history[m.replyIdx], "…thinking") {
+			m.history = append(m.history[:m.replyIdx], m.history[m.replyIdx+1:]...)
+			m.refreshViewport()
 		}
 		m.waiting = false
+		m.stream = nil
+		m.replyIdx = -1
+		m.replyBuf.Reset()
 		return m, nil
 	}
 
@@ -123,23 +144,18 @@ func (m *model) View() string {
 	return fmt.Sprintf("%s\n%s", m.viewport.View(), m.input.View())
 }
 
-func (m *model) askBot(text string) tea.Cmd {
+func waitForChunk(ch <-chan chat.Chunk) tea.Cmd {
 	return func() tea.Msg {
-		reply, err := m.handler(m.ctx, text)
-		return botReply{text: reply, err: err}
+		c, ok := <-ch
+		if !ok {
+			return streamDoneMsg{}
+		}
+		return chunkMsg(c)
 	}
 }
 
 func (m *model) appendLine(s string) {
 	m.history = append(m.history, s)
-	m.refreshViewport()
-}
-
-func (m *model) dropLastLine() {
-	if len(m.history) == 0 {
-		return
-	}
-	m.history = m.history[:len(m.history)-1]
 	m.refreshViewport()
 }
 

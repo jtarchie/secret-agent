@@ -4,7 +4,6 @@ package runtime
 import (
 	"context"
 	"fmt"
-	"strings"
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
@@ -15,6 +14,7 @@ import (
 	"google.golang.org/genai"
 
 	"github.com/jtarchie/secret-agent/internal/bot"
+	"github.com/jtarchie/secret-agent/internal/chat"
 	"github.com/jtarchie/secret-agent/internal/tool"
 )
 
@@ -74,23 +74,42 @@ func New(ctx context.Context, b *bot.Bot, llm adkmodel.LLM) (*Runtime, error) {
 	}, nil
 }
 
-// Send runs one turn and returns the bot's final text response.
-func (r *Runtime) Send(ctx context.Context, userMsg string) (string, error) {
-	msg := genai.NewContentFromText(userMsg, genai.RoleUser)
+// Send runs one turn and streams the bot's reply as chat.Chunks.
+// The returned channel is closed when the turn completes.
+func (r *Runtime) Send(ctx context.Context, userMsg string) <-chan chat.Chunk {
+	out := make(chan chat.Chunk)
 
-	var reply strings.Builder
-	for ev, err := range r.runner.Run(ctx, r.userID, r.sessionID, msg, agent.RunConfig{}) {
-		if err != nil {
-			return "", err
-		}
-		if !ev.IsFinalResponse() || ev.Content == nil {
-			continue
-		}
-		for _, p := range ev.Content.Parts {
-			if p.Text != "" {
-				reply.WriteString(p.Text)
+	go func() {
+		defer close(out)
+
+		msg := genai.NewContentFromText(userMsg, genai.RoleUser)
+		emit := func(c chat.Chunk) bool {
+			select {
+			case out <- c:
+				return true
+			case <-ctx.Done():
+				return false
 			}
 		}
-	}
-	return reply.String(), nil
+
+		for ev, err := range r.runner.Run(ctx, r.userID, r.sessionID, msg, agent.RunConfig{}) {
+			if err != nil {
+				emit(chat.Chunk{Err: err})
+				return
+			}
+			if ev.Content == nil {
+				continue
+			}
+			for _, p := range ev.Content.Parts {
+				if p.Text == "" {
+					continue
+				}
+				if !emit(chat.Chunk{Delta: p.Text}) {
+					return
+				}
+			}
+		}
+	}()
+
+	return out
 }
