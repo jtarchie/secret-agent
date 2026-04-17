@@ -44,12 +44,14 @@ type model struct {
 	width    int
 	height   int
 
-	stream   <-chan chat.Chunk
-	cancel   context.CancelFunc
-	canceled bool
-	replyIdx int
-	replyBuf strings.Builder
-	spinner  spinner.Model
+	stream       <-chan chat.Chunk
+	cancel       context.CancelFunc
+	canceled     bool
+	replyIdx     int
+	replyBuf     strings.Builder
+	spinner      spinner.Model
+	inputHist    []string
+	inputHistIdx int
 
 	userStyle   lipgloss.Style
 	botStyle    lipgloss.Style
@@ -111,6 +113,30 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		case tea.KeyEsc:
 			return m, tea.Quit
+		case tea.KeyUp:
+			if m.waiting {
+				return m, nil
+			}
+			if m.inputHistIdx > 0 {
+				m.inputHistIdx--
+				m.input.SetValue(m.inputHist[m.inputHistIdx])
+				m.input.CursorEnd()
+			}
+			return m, nil
+		case tea.KeyDown:
+			if m.waiting {
+				return m, nil
+			}
+			if m.inputHistIdx < len(m.inputHist) {
+				m.inputHistIdx++
+				if m.inputHistIdx == len(m.inputHist) {
+					m.input.SetValue("")
+				} else {
+					m.input.SetValue(m.inputHist[m.inputHistIdx])
+					m.input.CursorEnd()
+				}
+			}
+			return m, nil
 		case tea.KeyEnter:
 			if m.waiting {
 				return m, nil
@@ -120,6 +146,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			m.input.Reset()
+			m.pushInputHist(text)
 			m.appendLine(m.userStyle.Render("you") + ": " + text)
 			m.appendLine(m.thinkingLine())
 			m.replyIdx = len(m.history) - 1
@@ -193,6 +220,13 @@ func waitForChunk(ch <-chan chat.Chunk) tea.Cmd {
 		}
 		return chunkMsg(c)
 	}
+}
+
+func (m *model) pushInputHist(text string) {
+	if n := len(m.inputHist); n == 0 || m.inputHist[n-1] != text {
+		m.inputHist = append(m.inputHist, text)
+	}
+	m.inputHistIdx = len(m.inputHist)
 }
 
 func (m *model) thinkingLine() string {
