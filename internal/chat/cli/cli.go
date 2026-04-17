@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/charmbracelet/bubbles/help"
+	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/viewport"
@@ -33,6 +35,32 @@ type (
 	streamDoneMsg struct{}
 )
 
+type keyMap struct {
+	Send        key.Binding
+	Newline     key.Binding
+	HistoryPrev key.Binding
+	HistoryNext key.Binding
+	Cancel      key.Binding
+	Quit        key.Binding
+}
+
+func (k keyMap) ShortHelp() []key.Binding {
+	return []key.Binding{k.Send, k.Newline, k.HistoryPrev, k.HistoryNext, k.Cancel, k.Quit}
+}
+
+func (k keyMap) FullHelp() [][]key.Binding {
+	return [][]key.Binding{k.ShortHelp()}
+}
+
+var keys = keyMap{
+	Send:        key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "send")),
+	Newline:     key.NewBinding(key.WithKeys("alt+enter"), key.WithHelp("alt+enter", "newline")),
+	HistoryPrev: key.NewBinding(key.WithKeys("up"), key.WithHelp("↑", "prev")),
+	HistoryNext: key.NewBinding(key.WithKeys("down"), key.WithHelp("↓", "next")),
+	Cancel:      key.NewBinding(key.WithKeys("ctrl+c"), key.WithHelp("ctrl+c", "cancel/quit")),
+	Quit:        key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "quit")),
+}
+
 type model struct {
 	ctx      context.Context
 	botName  string
@@ -52,6 +80,7 @@ type model struct {
 	spinner      spinner.Model
 	inputHist    []string
 	inputHistIdx int
+	help         help.Model
 
 	userStyle   lipgloss.Style
 	botStyle    lipgloss.Style
@@ -74,6 +103,8 @@ func newModel(ctx context.Context, botName string, h chat.Handler) *model {
 	sp := spinner.New(spinner.WithSpinner(spinner.MiniDot))
 	sp.Style = statusStyle
 
+	hp := help.New()
+
 	return &model{
 		ctx:         ctx,
 		botName:     botName,
@@ -82,6 +113,7 @@ func newModel(ctx context.Context, botName string, h chat.Handler) *model {
 		input:       ta,
 		replyIdx:    -1,
 		spinner:     sp,
+		help:        hp,
 		userStyle:   lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("6")),
 		botStyle:    lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("5")),
 		errorStyle:  lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("9")),
@@ -99,10 +131,12 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 		inputHeight := 3
+		helpHeight := 1
 		m.viewport.Width = msg.Width
-		m.viewport.Height = msg.Height - inputHeight - 1
+		m.viewport.Height = msg.Height - inputHeight - helpHeight - 1
 		m.input.SetWidth(msg.Width)
 		m.input.SetHeight(inputHeight)
+		m.help.Width = msg.Width
 		m.refreshViewport()
 		return m, nil
 
@@ -217,7 +251,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m *model) View() string {
-	return fmt.Sprintf("%s\n%s", m.viewport.View(), m.input.View())
+	return fmt.Sprintf("%s\n%s\n%s", m.viewport.View(), m.input.View(), m.help.View(keys))
 }
 
 func waitForChunk(ch <-chan chat.Chunk) tea.Cmd {
