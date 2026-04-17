@@ -7,7 +7,7 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/bubbles/spinner"
-	"github.com/charmbracelet/bubbles/textinput"
+	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -39,7 +39,7 @@ type model struct {
 	handler  chat.Handler
 	history  []string
 	viewport viewport.Model
-	input    textinput.Model
+	input    textarea.Model
 	waiting  bool
 	width    int
 	height   int
@@ -60,10 +60,12 @@ type model struct {
 }
 
 func newModel(ctx context.Context, botName string, h chat.Handler) *model {
-	ti := textinput.New()
-	ti.Placeholder = "Type a message..."
-	ti.Focus()
-	ti.CharLimit = 4096
+	ta := textarea.New()
+	ta.Placeholder = "Type a message (enter to send, alt+enter for newline)..."
+	ta.Focus()
+	ta.CharLimit = 4096
+	ta.ShowLineNumbers = false
+	ta.SetHeight(3)
 
 	vp := viewport.New(80, 20)
 
@@ -77,7 +79,7 @@ func newModel(ctx context.Context, botName string, h chat.Handler) *model {
 		botName:     botName,
 		handler:     h,
 		viewport:    vp,
-		input:       ti,
+		input:       ta,
 		replyIdx:    -1,
 		spinner:     sp,
 		userStyle:   lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("6")),
@@ -88,7 +90,7 @@ func newModel(ctx context.Context, botName string, h chat.Handler) *model {
 }
 
 func (m *model) Init() tea.Cmd {
-	return textinput.Blink
+	return textarea.Blink
 }
 
 func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -96,9 +98,11 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
+		inputHeight := 3
 		m.viewport.Width = msg.Width
-		m.viewport.Height = msg.Height - 3
-		m.input.Width = msg.Width - 2
+		m.viewport.Height = msg.Height - inputHeight - 1
+		m.input.SetWidth(msg.Width)
+		m.input.SetHeight(inputHeight)
 		m.refreshViewport()
 		return m, nil
 
@@ -114,8 +118,8 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case tea.KeyEsc:
 			return m, tea.Quit
 		case tea.KeyUp:
-			if m.waiting {
-				return m, nil
+			if m.waiting || !m.inputIsSingleLine() {
+				break
 			}
 			if m.inputHistIdx > 0 {
 				m.inputHistIdx--
@@ -124,8 +128,8 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		case tea.KeyDown:
-			if m.waiting {
-				return m, nil
+			if m.waiting || !m.inputIsSingleLine() {
+				break
 			}
 			if m.inputHistIdx < len(m.inputHist) {
 				m.inputHistIdx++
@@ -139,6 +143,10 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case tea.KeyEnter:
 			if m.waiting {
+				return m, nil
+			}
+			if msg.Alt {
+				m.input.InsertRune('\n')
 				return m, nil
 			}
 			text := strings.TrimSpace(m.input.Value())
@@ -220,6 +228,10 @@ func waitForChunk(ch <-chan chat.Chunk) tea.Cmd {
 		}
 		return chunkMsg(c)
 	}
+}
+
+func (m *model) inputIsSingleLine() bool {
+	return !strings.Contains(m.input.Value(), "\n")
 }
 
 func (m *model) pushInputHist(text string) {
