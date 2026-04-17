@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/atotto/clipboard"
 	"github.com/charmbracelet/bubbles/help"
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/spinner"
@@ -81,6 +82,7 @@ type model struct {
 	inputHist    []string
 	inputHistIdx int
 	help         help.Model
+	lastReply    string
 
 	userStyle   lipgloss.Style
 	botStyle    lipgloss.Style
@@ -189,6 +191,9 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.input.Reset()
 			m.pushInputHist(text)
+			if strings.HasPrefix(text, "/") {
+				return m.runSlash(text)
+			}
 			m.appendLine(m.userStyle.Render("you") + ": " + text)
 			m.appendLine(m.thinkingLine())
 			m.replyIdx = len(m.history) - 1
@@ -228,6 +233,9 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.replyBuf.Len() == 0 && m.replyIdx >= 0 && m.replyIdx < len(m.history) {
 			m.history = append(m.history[:m.replyIdx], m.history[m.replyIdx+1:]...)
 		}
+		if m.replyBuf.Len() > 0 {
+			m.lastReply = m.replyBuf.String()
+		}
 		if m.canceled {
 			m.history = append(m.history, m.statusStyle.Render("(canceled)"))
 		}
@@ -261,6 +269,36 @@ func waitForChunk(ch <-chan chat.Chunk) tea.Cmd {
 			return streamDoneMsg{}
 		}
 		return chunkMsg(c)
+	}
+}
+
+func (m *model) runSlash(cmd string) (tea.Model, tea.Cmd) {
+	switch cmd {
+	case "/quit", "/exit":
+		return m, tea.Quit
+	case "/clear":
+		m.history = nil
+		m.refreshViewport()
+		return m, nil
+	case "/help":
+		m.appendLine(m.statusStyle.Render("commands: /clear, /copy, /help, /quit"))
+		m.appendLine(m.statusStyle.Render(m.help.FullHelpView(keys.FullHelp())))
+		m.appendLine("")
+		return m, nil
+	case "/copy":
+		if m.lastReply == "" {
+			m.appendLine(m.errorStyle.Render("error") + ": no reply to copy yet")
+			return m, nil
+		}
+		if err := clipboard.WriteAll(m.lastReply); err != nil {
+			m.appendLine(m.errorStyle.Render("error") + ": " + err.Error())
+			return m, nil
+		}
+		m.appendLine(m.statusStyle.Render("(copied last reply to clipboard)"))
+		return m, nil
+	default:
+		m.appendLine(m.errorStyle.Render("error") + ": unknown command " + cmd)
+		return m, nil
 	}
 }
 
