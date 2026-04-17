@@ -32,3 +32,7 @@ coverage.*
 
 # Logs
 *.log
+
+# signal-cli state (protocol keys, ratchet state — must never be committed)
+/signal-state/
+/tmp/signal-state/

@@ -14,7 +14,13 @@ type Chunk struct {
 // The channel is closed when the turn completes.
 type Handler func(ctx context.Context, userMsg string) <-chan Chunk
 
-// Transport runs a chat I/O loop against a Handler.
+// HandlerFactory returns a Handler bound to a specific conversation ID.
+// Single-peer transports (CLI) call it once with a constant ID; multi-peer
+// transports (Signal) call it per peer.
+type HandlerFactory func(convID string) Handler
+
+// Transport runs a chat I/O loop. It obtains per-conversation Handlers
+// from the factory as needed.
 type Transport interface {
-	Run(ctx context.Context, botName string, h Handler) error
+	Run(ctx context.Context, botName string, newHandler HandlerFactory) error
 }

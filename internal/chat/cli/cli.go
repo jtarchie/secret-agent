@@ -37,9 +37,9 @@ func New(opts ...Option) *Transport {
 	return t
 }
 
-func (t *Transport) Run(ctx context.Context, botName string, h chat.Handler) error {
+func (t *Transport) Run(ctx context.Context, botName string, newHandler chat.HandlerFactory) error {
 	_, err := tea.NewProgram(
-		newModel(ctx, botName, h, t.markdown),
+		newModel(ctx, botName, newHandler("local"), t.markdown),
 		tea.WithAltScreen(),
 		tea.WithMouseCellMotion(),
 	).Run()

@@ -4,6 +4,7 @@ package runtime
 import (
 	"context"
 	"fmt"
+	"sync"
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
@@ -19,10 +20,12 @@ import (
 )
 
 type Runtime struct {
-	appName   string
-	userID    string
-	sessionID string
-	runner    *runner.Runner
+	appName  string
+	sessions session.Service
+	runner   *runner.Runner
+
+	mu    sync.Mutex
+	known map[string]struct{}
 }
 
 func New(ctx context.Context, b *bot.Bot, llm adkmodel.LLM) (*Runtime, error) {
@@ -47,15 +50,6 @@ func New(ctx context.Context, b *bot.Bot, llm adkmodel.LLM) (*Runtime, error) {
 	}
 
 	sessions := session.InMemoryService()
-	const userID, sessionID = "local", "local"
-
-	if _, err := sessions.Create(ctx, &session.CreateRequest{
-		AppName:   b.Name,
-		UserID:    userID,
-		SessionID: sessionID,
-	}); err != nil {
-		return nil, fmt.Errorf("create session: %w", err)
-	}
 
 	r, err := runner.New(runner.Config{
 		AppName:        b.Name,
@@ -67,49 +61,73 @@ func New(ctx context.Context, b *bot.Bot, llm adkmodel.LLM) (*Runtime, error) {
 	}
 
 	return &Runtime{
-		appName:   b.Name,
-		userID:    userID,
-		sessionID: sessionID,
-		runner:    r,
+		appName:  b.Name,
+		sessions: sessions,
+		runner:   r,
+		known:    map[string]struct{}{},
 	}, nil
 }
 
-// Send runs one turn and streams the bot's reply as chat.Chunks.
-// The returned channel is closed when the turn completes.
-func (r *Runtime) Send(ctx context.Context, userMsg string) <-chan chat.Chunk {
-	out := make(chan chat.Chunk)
+// HandlerFor returns a chat.Handler bound to the given conversation ID.
+// The underlying ADK session is created lazily (in-memory) on first use.
+func (r *Runtime) HandlerFor(convID string) chat.Handler {
+	return func(ctx context.Context, userMsg string) <-chan chat.Chunk {
+		out := make(chan chat.Chunk)
 
-	go func() {
-		defer close(out)
+		go func() {
+			defer close(out)
 
-		msg := genai.NewContentFromText(userMsg, genai.RoleUser)
-		emit := func(c chat.Chunk) bool {
-			select {
-			case out <- c:
-				return true
-			case <-ctx.Done():
-				return false
+			emit := func(c chat.Chunk) bool {
+				select {
+				case out <- c:
+					return true
+				case <-ctx.Done():
+					return false
+				}
 			}
-		}
 
-		for ev, err := range r.runner.Run(ctx, r.userID, r.sessionID, msg, agent.RunConfig{}) {
-			if err != nil {
+			if err := r.ensureSession(ctx, convID); err != nil {
 				emit(chat.Chunk{Err: err})
 				return
 			}
-			if ev.Content == nil {
-				continue
-			}
-			for _, p := range ev.Content.Parts {
-				if p.Text == "" {
-					continue
-				}
-				if !emit(chat.Chunk{Delta: p.Text}) {
+
+			msg := genai.NewContentFromText(userMsg, genai.RoleUser)
+			for ev, err := range r.runner.Run(ctx, convID, convID, msg, agent.RunConfig{}) {
+				if err != nil {
+					emit(chat.Chunk{Err: err})
 					return
 				}
+				if ev.Content == nil {
+					continue
+				}
+				for _, p := range ev.Content.Parts {
+					if p.Text == "" {
+						continue
+					}
+					if !emit(chat.Chunk{Delta: p.Text}) {
+						return
+					}
+				}
 			}
-		}
-	}()
+		}()
 
-	return out
+		return out
+	}
+}
+
+func (r *Runtime) ensureSession(ctx context.Context, convID string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, ok := r.known[convID]; ok {
+		return nil
+	}
+	if _, err := r.sessions.Create(ctx, &session.CreateRequest{
+		AppName:   r.appName,
+		UserID:    convID,
+		SessionID: convID,
+	}); err != nil {
+		return fmt.Errorf("create session %q: %w", convID, err)
+	}
+	r.known[convID] = struct{}{}
+	return nil
 }
