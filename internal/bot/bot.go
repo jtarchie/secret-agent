@@ -12,6 +12,13 @@ import (
 type Bot struct {
 	Name   string `yaml:"name"`
 	System string `yaml:"system"`
+	Tools  []Tool `yaml:"tools"`
+}
+
+type Tool struct {
+	Name        string `yaml:"name"`
+	Description string `yaml:"description"`
+	Sh          string `yaml:"sh"`
 }
 
 func Load(path string) (*Bot, error) {
@@ -33,6 +40,19 @@ func Load(path string) (*Bot, error) {
 	}
 	if b.System == "" {
 		return nil, fmt.Errorf("%s: system is required", path)
+	}
+
+	for i := range b.Tools {
+		t := &b.Tools[i]
+		t.Name = strings.TrimSpace(t.Name)
+		t.Description = strings.TrimSpace(t.Description)
+		t.Sh = strings.TrimSpace(t.Sh)
+		if t.Name == "" {
+			return nil, fmt.Errorf("%s: tools[%d].name is required", path, i)
+		}
+		if t.Sh == "" {
+			return nil, fmt.Errorf("%s: tool %q: sh is required", path, t.Name)
+		}
 	}
 
 	return &b, nil

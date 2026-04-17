@@ -11,9 +11,11 @@ import (
 	adkmodel "google.golang.org/adk/model"
 	"google.golang.org/adk/runner"
 	"google.golang.org/adk/session"
+	adktool "google.golang.org/adk/tool"
 	"google.golang.org/genai"
 
 	"github.com/jtarchie/secret-agent/internal/bot"
+	"github.com/jtarchie/secret-agent/internal/tool"
 )
 
 type Runtime struct {
@@ -24,11 +26,21 @@ type Runtime struct {
 }
 
 func New(ctx context.Context, b *bot.Bot, llm adkmodel.LLM) (*Runtime, error) {
+	tools := make([]adktool.Tool, 0, len(b.Tools))
+	for _, t := range b.Tools {
+		built, err := tool.NewShell(t.Name, t.Description, t.Sh)
+		if err != nil {
+			return nil, fmt.Errorf("tool %q: %w", t.Name, err)
+		}
+		tools = append(tools, built)
+	}
+
 	root, err := llmagent.New(llmagent.Config{
 		Name:        b.Name,
 		Description: fmt.Sprintf("YAML-defined bot %q", b.Name),
 		Model:       llm,
 		Instruction: b.System,
+		Tools:       tools,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("create agent: %w", err)

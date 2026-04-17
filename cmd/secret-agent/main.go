@@ -37,6 +37,7 @@ func run(args []string) error {
 	fs.SetOutput(os.Stderr)
 	modelFlag := fs.String("model", "", "provider/model-name (e.g. openrouter/anthropic/claude-sonnet-4-5)")
 	keyFlag := fs.String("api-key", "", "API key for the model provider")
+	baseURLFlag := fs.String("base-url", "", "override the provider's base URL (e.g. http://127.0.0.1:1234/v1 for a local OpenAI-compatible server)")
 	if err := fs.Parse(args[1:]); err != nil {
 		return err
 	}
@@ -53,7 +54,7 @@ func run(args []string) error {
 	}
 
 	provider, name := model.SplitModel(*modelFlag)
-	llm, err := model.Resolve(provider, name, *keyFlag)
+	llm, err := model.Resolve(provider, name, *keyFlag, *baseURLFlag)
 	if err != nil {
 		return err
 	}

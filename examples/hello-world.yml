@@ -2,3 +2,9 @@ name: hello-world-bot
 system:
   You are a helpful assistant that responds to user messages with a friendly greeting.
   Always respond with a greeting that includes the user's name if provided.
+
+tools:
+  - name: current_time
+    description: Get the current time in a human-readable format.
+    sh: |
+      date +"%Y-%m-%d %H:%M:%S"
