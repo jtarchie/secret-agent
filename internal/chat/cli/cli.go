@@ -13,18 +13,33 @@ import (
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/jtarchie/secret-agent/internal/chat"
 )
 
-type Transport struct{}
+type Transport struct {
+	markdown bool
+}
 
-func New() *Transport { return &Transport{} }
+type Option func(*Transport)
+
+func WithMarkdown(on bool) Option {
+	return func(t *Transport) { t.markdown = on }
+}
+
+func New(opts ...Option) *Transport {
+	t := &Transport{markdown: true}
+	for _, opt := range opts {
+		opt(t)
+	}
+	return t
+}
 
 func (t *Transport) Run(ctx context.Context, botName string, h chat.Handler) error {
 	_, err := tea.NewProgram(
-		newModel(ctx, botName, h),
+		newModel(ctx, botName, h, t.markdown),
 		tea.WithAltScreen(),
 		tea.WithMouseCellMotion(),
 	).Run()
@@ -83,6 +98,8 @@ type model struct {
 	inputHistIdx int
 	help         help.Model
 	lastReply    string
+	markdown     bool
+	renderer     *glamour.TermRenderer
 
 	userStyle   lipgloss.Style
 	botStyle    lipgloss.Style
@@ -90,7 +107,7 @@ type model struct {
 	statusStyle lipgloss.Style
 }
 
-func newModel(ctx context.Context, botName string, h chat.Handler) *model {
+func newModel(ctx context.Context, botName string, h chat.Handler, markdown bool) *model {
 	ta := textarea.New()
 	ta.Placeholder = "Type a message (enter to send, alt+enter for newline)..."
 	ta.Focus()
@@ -116,6 +133,7 @@ func newModel(ctx context.Context, botName string, h chat.Handler) *model {
 		replyIdx:    -1,
 		spinner:     sp,
 		help:        hp,
+		markdown:    markdown,
 		userStyle:   lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("6")),
 		botStyle:    lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("5")),
 		errorStyle:  lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("9")),
@@ -139,6 +157,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.input.SetWidth(msg.Width)
 		m.input.SetHeight(inputHeight)
 		m.help.Width = msg.Width
+		m.rebuildRenderer()
 		m.refreshViewport()
 		return m, nil
 
@@ -235,6 +254,9 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.replyBuf.Len() > 0 {
 			m.lastReply = m.replyBuf.String()
+			if rendered, ok := m.renderMarkdown(m.lastReply); ok && m.replyIdx >= 0 && m.replyIdx < len(m.history) {
+				m.history[m.replyIdx] = m.botStyle.Render(m.botName) + ":\n" + rendered
+			}
 		}
 		if m.canceled {
 			m.history = append(m.history, m.statusStyle.Render("(canceled)"))
@@ -270,6 +292,31 @@ func waitForChunk(ch <-chan chat.Chunk) tea.Cmd {
 		}
 		return chunkMsg(c)
 	}
+}
+
+func (m *model) rebuildRenderer() {
+	if !m.markdown || m.width <= 0 {
+		return
+	}
+	r, err := glamour.NewTermRenderer(
+		glamour.WithAutoStyle(),
+		glamour.WithWordWrap(m.width),
+	)
+	if err != nil {
+		return
+	}
+	m.renderer = r
+}
+
+func (m *model) renderMarkdown(s string) (string, bool) {
+	if !m.markdown || m.renderer == nil {
+		return "", false
+	}
+	out, err := m.renderer.Render(s)
+	if err != nil {
+		return "", false
+	}
+	return strings.TrimSpace(out), true
 }
 
 func (m *model) runSlash(cmd string) (tea.Model, tea.Cmd) {
