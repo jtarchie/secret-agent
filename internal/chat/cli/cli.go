@@ -45,6 +45,8 @@ type model struct {
 	height   int
 
 	stream   <-chan chat.Chunk
+	cancel   context.CancelFunc
+	canceled bool
 	replyIdx int
 	replyBuf strings.Builder
 	spinner  spinner.Model
@@ -100,7 +102,14 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.KeyMsg:
 		switch msg.Type {
-		case tea.KeyCtrlC, tea.KeyEsc:
+		case tea.KeyCtrlC:
+			if m.waiting && m.cancel != nil {
+				m.cancel()
+				m.canceled = true
+				return m, nil
+			}
+			return m, tea.Quit
+		case tea.KeyEsc:
 			return m, tea.Quit
 		case tea.KeyEnter:
 			if m.waiting {
@@ -115,7 +124,10 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.appendLine(m.thinkingLine())
 			m.replyIdx = len(m.history) - 1
 			m.replyBuf.Reset()
-			m.stream = m.handler(m.ctx, text)
+			m.canceled = false
+			sendCtx, cancel := context.WithCancel(m.ctx)
+			m.cancel = cancel
+			m.stream = m.handler(sendCtx, text)
 			m.waiting = true
 			return m, tea.Batch(waitForChunk(m.stream), m.spinner.Tick)
 		}
@@ -147,12 +159,20 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.replyBuf.Len() == 0 && m.replyIdx >= 0 && m.replyIdx < len(m.history) {
 			m.history = append(m.history[:m.replyIdx], m.history[m.replyIdx+1:]...)
 		}
+		if m.canceled {
+			m.history = append(m.history, m.statusStyle.Render("(canceled)"))
+		}
 		m.history = append(m.history, "")
 		m.refreshViewport()
+		if m.cancel != nil {
+			m.cancel()
+			m.cancel = nil
+		}
 		m.waiting = false
 		m.stream = nil
 		m.replyIdx = -1
 		m.replyBuf.Reset()
+		m.canceled = false
 		return m, nil
 	}
 
