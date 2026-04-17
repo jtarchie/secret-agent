@@ -22,6 +22,7 @@ func (t *Transport) Run(ctx context.Context, botName string, h chat.Handler) err
 	_, err := tea.NewProgram(
 		newModel(ctx, botName, h),
 		tea.WithAltScreen(),
+		tea.WithMouseCellMotion(),
 	).Run()
 	return err
 }
@@ -126,8 +127,9 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.replyBuf.Len() == 0 && m.replyIdx >= 0 && m.replyIdx < len(m.history) &&
 			strings.Contains(m.history[m.replyIdx], "…thinking") {
 			m.history = append(m.history[:m.replyIdx], m.history[m.replyIdx+1:]...)
-			m.refreshViewport()
 		}
+		m.history = append(m.history, "")
+		m.refreshViewport()
 		m.waiting = false
 		m.stream = nil
 		m.replyIdx = -1
