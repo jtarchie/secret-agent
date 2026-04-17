@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
@@ -46,6 +47,7 @@ type model struct {
 	stream   <-chan chat.Chunk
 	replyIdx int
 	replyBuf strings.Builder
+	spinner  spinner.Model
 
 	userStyle   lipgloss.Style
 	botStyle    lipgloss.Style
@@ -61,6 +63,11 @@ func newModel(ctx context.Context, botName string, h chat.Handler) *model {
 
 	vp := viewport.New(80, 20)
 
+	statusStyle := lipgloss.NewStyle().Faint(true)
+
+	sp := spinner.New(spinner.WithSpinner(spinner.MiniDot))
+	sp.Style = statusStyle
+
 	return &model{
 		ctx:         ctx,
 		botName:     botName,
@@ -68,10 +75,11 @@ func newModel(ctx context.Context, botName string, h chat.Handler) *model {
 		viewport:    vp,
 		input:       ti,
 		replyIdx:    -1,
+		spinner:     sp,
 		userStyle:   lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("6")),
 		botStyle:    lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("5")),
 		errorStyle:  lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("9")),
-		statusStyle: lipgloss.NewStyle().Faint(true),
+		statusStyle: statusStyle,
 	}
 }
 
@@ -104,13 +112,25 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.input.Reset()
 			m.appendLine(m.userStyle.Render("you") + ": " + text)
-			m.appendLine(m.statusStyle.Render("…thinking"))
+			m.appendLine(m.thinkingLine())
 			m.replyIdx = len(m.history) - 1
 			m.replyBuf.Reset()
 			m.stream = m.handler(m.ctx, text)
 			m.waiting = true
-			return m, waitForChunk(m.stream)
+			return m, tea.Batch(waitForChunk(m.stream), m.spinner.Tick)
 		}
+
+	case spinner.TickMsg:
+		if !m.waiting {
+			return m, nil
+		}
+		var cmd tea.Cmd
+		m.spinner, cmd = m.spinner.Update(msg)
+		if m.replyBuf.Len() == 0 && m.replyIdx >= 0 && m.replyIdx < len(m.history) {
+			m.history[m.replyIdx] = m.thinkingLine()
+			m.refreshViewport()
+		}
+		return m, cmd
 
 	case chunkMsg:
 		if msg.Err != nil {
@@ -124,8 +144,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, waitForChunk(m.stream)
 
 	case streamDoneMsg:
-		if m.replyBuf.Len() == 0 && m.replyIdx >= 0 && m.replyIdx < len(m.history) &&
-			strings.Contains(m.history[m.replyIdx], "…thinking") {
+		if m.replyBuf.Len() == 0 && m.replyIdx >= 0 && m.replyIdx < len(m.history) {
 			m.history = append(m.history[:m.replyIdx], m.history[m.replyIdx+1:]...)
 		}
 		m.history = append(m.history, "")
@@ -154,6 +173,10 @@ func waitForChunk(ch <-chan chat.Chunk) tea.Cmd {
 		}
 		return chunkMsg(c)
 	}
+}
+
+func (m *model) thinkingLine() string {
+	return m.statusStyle.Render(m.spinner.View() + " thinking")
 }
 
 func (m *model) appendLine(s string) {
