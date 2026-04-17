@@ -299,7 +299,7 @@ func (m *model) rebuildRenderer() {
 		return
 	}
 	r, err := glamour.NewTermRenderer(
-		glamour.WithAutoStyle(),
+		glamour.WithStandardStyle("dark"),
 		glamour.WithWordWrap(m.width),
 	)
 	if err != nil {
