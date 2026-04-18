@@ -49,7 +49,6 @@ func (t *Transport) Run(ctx context.Context, botName string, newHandler chat.Han
 	_, err := tea.NewProgram(
 		newModel(ctx, botName, newHandler("local"), t.markdown, t.attachmentsOK),
 		tea.WithAltScreen(),
-		tea.WithMouseCellMotion(),
 	).Run()
 	return err
 }
@@ -64,16 +63,24 @@ type keyMap struct {
 	Newline     key.Binding
 	HistoryPrev key.Binding
 	HistoryNext key.Binding
+	ScrollUp    key.Binding
+	ScrollDown  key.Binding
+	HalfUp      key.Binding
+	HalfDown    key.Binding
 	Cancel      key.Binding
 	Quit        key.Binding
 }
 
 func (k keyMap) ShortHelp() []key.Binding {
-	return []key.Binding{k.Send, k.Newline, k.HistoryPrev, k.HistoryNext, k.Cancel, k.Quit}
+	return []key.Binding{k.Send, k.Newline, k.HistoryPrev, k.HistoryNext, k.ScrollUp, k.ScrollDown, k.Cancel, k.Quit}
 }
 
 func (k keyMap) FullHelp() [][]key.Binding {
-	return [][]key.Binding{k.ShortHelp()}
+	return [][]key.Binding{
+		{k.Send, k.Newline, k.HistoryPrev, k.HistoryNext},
+		{k.ScrollUp, k.ScrollDown, k.HalfUp, k.HalfDown},
+		{k.Cancel, k.Quit},
+	}
 }
 
 var keys = keyMap{
@@ -81,6 +88,10 @@ var keys = keyMap{
 	Newline:     key.NewBinding(key.WithKeys("alt+enter"), key.WithHelp("alt+enter", "newline")),
 	HistoryPrev: key.NewBinding(key.WithKeys("up"), key.WithHelp("↑", "prev")),
 	HistoryNext: key.NewBinding(key.WithKeys("down"), key.WithHelp("↓", "next")),
+	ScrollUp:    key.NewBinding(key.WithKeys("pgup"), key.WithHelp("pgup", "scroll up")),
+	ScrollDown:  key.NewBinding(key.WithKeys("pgdown"), key.WithHelp("pgdn", "scroll down")),
+	HalfUp:      key.NewBinding(key.WithKeys("ctrl+u"), key.WithHelp("ctrl+u", "½ page up")),
+	HalfDown:    key.NewBinding(key.WithKeys("ctrl+d"), key.WithHelp("ctrl+d", "½ page down")),
 	Cancel:      key.NewBinding(key.WithKeys("ctrl+c"), key.WithHelp("ctrl+c", "cancel/quit")),
 	Quit:        key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "quit")),
 }
@@ -108,6 +119,7 @@ type model struct {
 	lastReply     string
 	markdown      bool
 	attachmentsOK bool
+	mouseOn       bool
 	renderer      *glamour.TermRenderer
 
 	userStyle   lipgloss.Style
@@ -172,6 +184,20 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyMsg:
+		switch msg.String() {
+		case "pgup":
+			m.viewport.ViewUp()
+			return m, nil
+		case "pgdown":
+			m.viewport.ViewDown()
+			return m, nil
+		case "ctrl+u":
+			m.viewport.HalfViewUp()
+			return m, nil
+		case "ctrl+d":
+			m.viewport.HalfViewDown()
+			return m, nil
+		}
 		switch msg.Type {
 		case tea.KeyCtrlC:
 			if m.waiting && m.cancel != nil {
@@ -359,10 +385,18 @@ func (m *model) runSlash(cmd string) (tea.Model, tea.Cmd) {
 		m.refreshViewport()
 		return m, nil
 	case "/help":
-		m.appendLine(m.statusStyle.Render("commands: /clear, /copy, /help, /quit"))
+		m.appendLine(m.statusStyle.Render("commands: /clear, /copy, /help, /mouse, /quit"))
 		m.appendLine(m.statusStyle.Render(m.help.FullHelpView(keys.FullHelp())))
 		m.appendLine("")
 		return m, nil
+	case "/mouse":
+		m.mouseOn = !m.mouseOn
+		if m.mouseOn {
+			m.appendLine(m.statusStyle.Render("(mouse scrolling enabled — text selection blocked until disabled)"))
+			return m, tea.EnableMouseCellMotion
+		}
+		m.appendLine(m.statusStyle.Render("(mouse scrolling disabled — text selection restored)"))
+		return m, tea.DisableMouse
 	case "/copy":
 		if m.lastReply == "" {
 			m.appendLine(m.errorStyle.Render("error") + ": no reply to copy yet")
