@@ -60,7 +60,20 @@ func New(ctx context.Context, b *bot.Bot, llm adkmodel.LLM) (*Runtime, error) {
 func buildAgent(name, description string, b *bot.Bot, llm adkmodel.LLM) (agent.Agent, error) {
 	tools := make([]adktool.Tool, 0, len(b.Tools)+len(b.Agents))
 	for _, t := range b.Tools {
-		built, err := tool.NewShell(t.Name, t.Description, t.Sh, t.Params)
+		var (
+			built adktool.Tool
+			err   error
+		)
+		switch {
+		case t.Sh != "":
+			built, err = tool.NewShell(t.Name, t.Description, t.Sh, t.Params)
+		case t.Expr != "":
+			built, err = tool.NewExpr(t.Name, t.Description, t.Expr, t.Params)
+		case t.Js != "":
+			built, err = tool.NewJs(t.Name, t.Description, t.Js, t.Params)
+		default:
+			return nil, fmt.Errorf("tool %q: no runtime (sh/expr/js) set", t.Name)
+		}
 		if err != nil {
 			return nil, fmt.Errorf("tool %q: %w", t.Name, err)
 		}

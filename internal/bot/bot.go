@@ -41,6 +41,8 @@ type Tool struct {
 	Name        string           `yaml:"name"`
 	Description string           `yaml:"description"`
 	Sh          string           `yaml:"sh"`
+	Expr        string           `yaml:"expr"`
+	Js          string           `yaml:"js"`
 	Params      map[string]Param `yaml:"params"`
 }
 
@@ -212,11 +214,27 @@ func loadBot(path string, visited map[string]bool, depth int) (*Bot, error) {
 		t.Name = strings.TrimSpace(t.Name)
 		t.Description = strings.TrimSpace(t.Description)
 		t.Sh = strings.TrimSpace(t.Sh)
+		t.Expr = strings.TrimSpace(t.Expr)
+		t.Js = strings.TrimSpace(t.Js)
 		if t.Name == "" {
 			return nil, fmt.Errorf("%s: tools[%d].name is required", path, i)
 		}
-		if t.Sh == "" {
-			return nil, fmt.Errorf("%s: tool %q: sh is required", path, t.Name)
+		set := []string{}
+		if t.Sh != "" {
+			set = append(set, "sh")
+		}
+		if t.Expr != "" {
+			set = append(set, "expr")
+		}
+		if t.Js != "" {
+			set = append(set, "js")
+		}
+		switch len(set) {
+		case 0:
+			return nil, fmt.Errorf("%s: tool %q: exactly one of sh, expr, js is required", path, t.Name)
+		case 1:
+		default:
+			return nil, fmt.Errorf("%s: tool %q: only one of sh, expr, js may be set (got %s)", path, t.Name, strings.Join(set, ", "))
 		}
 		for name, p := range t.Params {
 			if err := p.validate(t.Name, name); err != nil {

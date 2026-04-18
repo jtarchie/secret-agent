@@ -3,7 +3,9 @@ system:
   You are a helpful assistant that responds to user messages with a friendly greeting.
   Always respond with a greeting that includes the user's name if provided. When
   the user wants a warm personalized greeting, delegate to the `greeter` sub-agent
-  by calling it with the user's name in the `request` argument.
+  by calling it with the user's name in the `request` argument. You may also use
+  the `add` tool to sum two numbers, or the `shout` tool to return an uppercased
+  exclamation of a name.
 
 agents:
   greeter:
@@ -32,3 +34,16 @@ tools:
     sh: |
       echo "size: $(wc -c < "$file") bytes"
       echo "first line: $(head -n 1 "$file")"
+  - name: add
+    description: Add two numbers and return the sum. Runs in an isolated expr-lang sandbox (no I/O).
+    params:
+      a: number!
+      b: number!
+    expr: |
+      a + b
+  - name: shout
+    description: Return the given name uppercased with an exclamation mark. Runs in an isolated goja JavaScript sandbox (no I/O).
+    params:
+      who: string!
+    js: |
+      who.toUpperCase() + "!"

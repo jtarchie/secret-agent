@@ -146,6 +146,81 @@ agents:
 	}
 }
 
+func TestLoadToolExprRuntime(t *testing.T) {
+	p := writeBot(t, `
+name: b
+system: s
+tools:
+  - name: add
+    expr: a + b
+    params:
+      a: number!
+      b: number!
+`)
+	b, err := Load(p)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if b.Tools[0].Expr != "a + b" {
+		t.Errorf("expr = %q", b.Tools[0].Expr)
+	}
+}
+
+func TestLoadToolJsRuntime(t *testing.T) {
+	p := writeBot(t, `
+name: b
+system: s
+tools:
+  - name: shout
+    js: who.toUpperCase()
+    params:
+      who: string!
+`)
+	b, err := Load(p)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if b.Tools[0].Js != "who.toUpperCase()" {
+		t.Errorf("js = %q", b.Tools[0].Js)
+	}
+}
+
+func TestLoadToolRejectsNoRuntime(t *testing.T) {
+	p := writeBot(t, `
+name: b
+system: s
+tools:
+  - name: t
+    params:
+      x: string!
+`)
+	_, err := Load(p)
+	if err == nil {
+		t.Fatal("expected error for tool with no runtime")
+	}
+	if !strings.Contains(err.Error(), "sh, expr, js") {
+		t.Errorf("error should list runtimes: %v", err)
+	}
+}
+
+func TestLoadToolRejectsMultipleRuntimes(t *testing.T) {
+	p := writeBot(t, `
+name: b
+system: s
+tools:
+  - name: t
+    sh: echo hi
+    expr: "42"
+`)
+	_, err := Load(p)
+	if err == nil {
+		t.Fatal("expected error for tool with multiple runtimes")
+	}
+	if !strings.Contains(err.Error(), "only one") {
+		t.Errorf("error should say only one: %v", err)
+	}
+}
+
 func TestLoadAgentsCycle(t *testing.T) {
 	dir := t.TempDir()
 	a := filepath.Join(dir, "a.yml")
