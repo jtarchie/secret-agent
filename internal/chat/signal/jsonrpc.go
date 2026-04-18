@@ -169,9 +169,17 @@ type envelope struct {
 }
 
 type dataMessage struct {
-	Timestamp int64      `json:"timestamp"`
-	Message   string     `json:"message"`
-	GroupInfo *groupInfo `json:"groupInfo,omitempty"`
+	Timestamp   int64          `json:"timestamp"`
+	Message     string         `json:"message"`
+	GroupInfo   *groupInfo     `json:"groupInfo,omitempty"`
+	Attachments []signalAttach `json:"attachments,omitempty"`
+}
+
+type signalAttach struct {
+	ID          string `json:"id"`
+	ContentType string `json:"contentType"`
+	Filename    string `json:"filename"`
+	Size        int64  `json:"size"`
 }
 
 type groupInfo struct {

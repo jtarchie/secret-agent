@@ -4,6 +4,8 @@ package runtime
 import (
 	"context"
 	"fmt"
+	"net/http"
+	"os"
 	"sync"
 
 	"google.golang.org/adk/agent"
@@ -71,7 +73,7 @@ func New(ctx context.Context, b *bot.Bot, llm adkmodel.LLM) (*Runtime, error) {
 // HandlerFor returns a chat.Handler bound to the given conversation ID.
 // The underlying ADK session is created lazily (in-memory) on first use.
 func (r *Runtime) HandlerFor(convID string) chat.Handler {
-	return func(ctx context.Context, userMsg string) <-chan chat.Chunk {
+	return func(ctx context.Context, userMsg chat.Message) <-chan chat.Chunk {
 		out := make(chan chat.Chunk)
 
 		go func() {
@@ -91,7 +93,11 @@ func (r *Runtime) HandlerFor(convID string) chat.Handler {
 				return
 			}
 
-			msg := genai.NewContentFromText(userMsg, genai.RoleUser)
+			msg, err := buildUserContent(userMsg)
+			if err != nil {
+				emit(chat.Chunk{Err: err})
+				return
+			}
 			for ev, err := range r.runner.Run(ctx, convID, convID, msg, agent.RunConfig{}) {
 				if err != nil {
 					emit(chat.Chunk{Err: err})
@@ -113,6 +119,31 @@ func (r *Runtime) HandlerFor(convID string) chat.Handler {
 
 		return out
 	}
+}
+
+// buildUserContent composes a user-role genai.Content from a chat.Message.
+// Attachments are loaded from disk and attached as inline bytes; the MIME
+// type is sniffed from the content when the transport did not supply one.
+func buildUserContent(msg chat.Message) (*genai.Content, error) {
+	if len(msg.Attachments) == 0 {
+		return genai.NewContentFromText(msg.Text, genai.RoleUser), nil
+	}
+	parts := make([]*genai.Part, 0, len(msg.Attachments)+1)
+	if msg.Text != "" {
+		parts = append(parts, genai.NewPartFromText(msg.Text))
+	}
+	for _, a := range msg.Attachments {
+		data, err := os.ReadFile(a.Path)
+		if err != nil {
+			return nil, fmt.Errorf("read attachment %s: %w", a.Path, err)
+		}
+		ct := a.ContentType
+		if ct == "" {
+			ct = http.DetectContentType(data)
+		}
+		parts = append(parts, genai.NewPartFromBytes(data, ct))
+	}
+	return genai.NewContentFromParts(parts, genai.RoleUser), nil
 }
 
 func (r *Runtime) ensureSession(ctx context.Context, convID string) error {

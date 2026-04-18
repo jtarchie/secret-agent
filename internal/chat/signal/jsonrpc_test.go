@@ -12,6 +12,9 @@ import (
 // A realistic `receive` notification captured from signal-cli (minimized).
 const receiveNotif = `{"jsonrpc":"2.0","method":"receive","params":{"envelope":{"source":"+15551234567","sourceNumber":"+15551234567","sourceUuid":"abcd1234-ef56-7890-abcd-ef1234567890","sourceName":"Alice","timestamp":1700000000000,"dataMessage":{"timestamp":1700000000000,"message":"hello bot"}},"account":"+15557654321"}}` + "\n"
 
+// A receive notification carrying an image attachment.
+const receiveAttachNotif = `{"jsonrpc":"2.0","method":"receive","params":{"envelope":{"sourceUuid":"abcd1234-ef56-7890-abcd-ef1234567890","timestamp":1700000000000,"dataMessage":{"timestamp":1700000000000,"message":"look","attachments":[{"id":"I4vFnQf-_9E1tpkDLSQo","contentType":"image/jpeg","filename":"photo.jpg","size":12345}]}}}}` + "\n"
+
 // A receive notification from a group — must be skipped by the transport.
 const receiveGroupNotif = `{"jsonrpc":"2.0","method":"receive","params":{"envelope":{"sourceUuid":"abcd1234-ef56-7890-abcd-ef1234567890","timestamp":1700000000000,"dataMessage":{"message":"hi group","groupInfo":{"groupId":"gid==","type":"DELIVER"}}}}}` + "\n"
 
@@ -244,6 +247,62 @@ func TestClientConcurrentCalls(t *testing.T) {
 	}
 	if !bytes.Contains(res2, []byte(`"second"`)) {
 		t.Errorf("res2 = %s", res2)
+	}
+}
+
+func TestReceiveAttachmentDecoding(t *testing.T) {
+	var reqBuf bytes.Buffer
+	respReader := strings.NewReader(receiveAttachNotif)
+
+	c := newClient(&reqBuf)
+	notifs := make(chan frame, 2)
+	readDone := make(chan error, 1)
+	go func() { readDone <- c.read(respReader, notifs) }()
+
+	var dm *dataMessage
+	for f := range notifs {
+		if f.Method != "receive" {
+			continue
+		}
+		var rp receiveParams
+		if err := json.Unmarshal(f.Params, &rp); err != nil {
+			t.Fatalf("decode params: %v", err)
+		}
+		dm = rp.Envelope.DataMessage
+	}
+
+	if dm == nil || len(dm.Attachments) != 1 {
+		t.Fatalf("expected 1 attachment, got %+v", dm)
+	}
+	a := dm.Attachments[0]
+	if a.ID != "I4vFnQf-_9E1tpkDLSQo" {
+		t.Errorf("id = %q", a.ID)
+	}
+	if a.ContentType != "image/jpeg" {
+		t.Errorf("contentType = %q", a.ContentType)
+	}
+	if a.Filename != "photo.jpg" {
+		t.Errorf("filename = %q", a.Filename)
+	}
+
+	tp := &Transport{stateDir: "/tmp/state"}
+	atts := tp.attachmentsFor(dm.Attachments)
+	if len(atts) != 1 {
+		t.Fatalf("attachmentsFor len = %d", len(atts))
+	}
+	wantPath := "/tmp/state/attachments/I4vFnQf-_9E1tpkDLSQo"
+	if atts[0].Path != wantPath {
+		t.Errorf("path = %q, want %q", atts[0].Path, wantPath)
+	}
+	if atts[0].Filename != "photo.jpg" {
+		t.Errorf("filename = %q", atts[0].Filename)
+	}
+	if atts[0].ContentType != "image/jpeg" {
+		t.Errorf("contentType = %q", atts[0].ContentType)
+	}
+
+	if err := <-readDone; err != nil && err != io.EOF {
+		t.Fatalf("reader err: %v", err)
 	}
 }
 

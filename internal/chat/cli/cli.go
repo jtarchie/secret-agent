@@ -213,14 +213,26 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if strings.HasPrefix(text, "/") {
 				return m.runSlash(text)
 			}
+			cleaned, atts, err := parseAttachments(text)
+			if err != nil {
+				m.appendLine(m.errorStyle.Render("error") + ": " + err.Error())
+				return m, nil
+			}
 			m.appendLine(m.userStyle.Render("you") + ": " + text)
+			if len(atts) > 0 {
+				names := make([]string, len(atts))
+				for i, a := range atts {
+					names[i] = a.Filename
+				}
+				m.appendLine(m.statusStyle.Render("(attached: " + strings.Join(names, ", ") + ")"))
+			}
 			m.appendLine(m.thinkingLine())
 			m.replyIdx = len(m.history) - 1
 			m.replyBuf.Reset()
 			m.canceled = false
 			sendCtx, cancel := context.WithCancel(m.ctx)
 			m.cancel = cancel
-			m.stream = m.handler(sendCtx, text)
+			m.stream = m.handler(sendCtx, chat.Message{Text: cleaned, Attachments: atts})
 			m.waiting = true
 			return m, tea.Batch(waitForChunk(m.stream), m.spinner.Tick)
 		}

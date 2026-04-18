@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -162,7 +163,8 @@ func (t *Transport) dispatchReceive(
 	}
 
 	text := strings.TrimSpace(env.DataMessage.Message)
-	if text == "" {
+	atts := t.attachmentsFor(env.DataMessage.Attachments)
+	if text == "" && len(atts) == 0 {
 		log.Debug("ignoring empty message", "source", env.peerID())
 		return
 	}
@@ -178,8 +180,30 @@ func (t *Transport) dispatchReceive(
 		"peer", peerID,
 		"source_name", env.SourceName,
 		"bytes", len(text),
+		"attachments", len(atts),
 	)
-	go t.handleDM(ctx, log, cli, newHandler(peerID), lockFor(peerID), peerID, recipient, text)
+	msg := chat.Message{Text: text, Attachments: atts}
+	go t.handleDM(ctx, log, cli, newHandler(peerID), lockFor(peerID), peerID, recipient, msg)
+}
+
+// attachmentsFor resolves signal-cli's attachment metadata to local file paths
+// under <stateDir>/attachments/<id>, where signal-cli stores downloaded blobs.
+func (t *Transport) attachmentsFor(in []signalAttach) []chat.Attachment {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]chat.Attachment, 0, len(in))
+	for _, a := range in {
+		if a.ID == "" {
+			continue
+		}
+		out = append(out, chat.Attachment{
+			Path:        filepath.Join(t.stateDir, "attachments", a.ID),
+			Filename:    a.Filename,
+			ContentType: a.ContentType,
+		})
+	}
+	return out
 }
 
 func (t *Transport) handleDM(
@@ -188,11 +212,12 @@ func (t *Transport) handleDM(
 	cli *client,
 	handler chat.Handler,
 	peerLock *sync.Mutex,
-	peerID, recipient, userMsg string,
+	peerID, recipient string,
+	userMsg chat.Message,
 ) {
 	peerLog := log.With("peer", peerID)
 	start := time.Now()
-	peerLog.Debug("handler: start", "bytes_in", len(userMsg))
+	peerLog.Debug("handler: start", "bytes_in", len(userMsg.Text), "attachments", len(userMsg.Attachments))
 
 	var reply strings.Builder
 	var replyErr error

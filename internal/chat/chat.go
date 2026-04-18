@@ -10,9 +10,24 @@ type Chunk struct {
 	Err   error
 }
 
+// Attachment is a file the user included with a message. The runtime reads
+// Path from local disk, so the transport must ensure the file is available
+// there before dispatching.
+type Attachment struct {
+	Path        string
+	Filename    string
+	ContentType string
+}
+
+// Message is a single user turn: free-form text plus any attached files.
+type Message struct {
+	Text        string
+	Attachments []Attachment
+}
+
 // Handler handles a single user message and returns a channel of reply chunks.
 // The channel is closed when the turn completes.
-type Handler func(ctx context.Context, userMsg string) <-chan Chunk
+type Handler func(ctx context.Context, msg Message) <-chan Chunk
 
 // HandlerFactory returns a Handler bound to a specific conversation ID.
 // Single-peer transports (CLI) call it once with a constant ID; multi-peer
