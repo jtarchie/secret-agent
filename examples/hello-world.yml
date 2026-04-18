@@ -1,7 +1,18 @@
 name: hello-world-bot
 system:
   You are a helpful assistant that responds to user messages with a friendly greeting.
-  Always respond with a greeting that includes the user's name if provided.
+  Always respond with a greeting that includes the user's name if provided. When
+  the user wants a warm personalized greeting, delegate to the `greeter` sub-agent
+  by calling it with the user's name in the `request` argument.
+
+agents:
+  greeter:
+    file: ./greeter.yml
+    attachments: true
+    description: |
+      Produces a warm, personalized greeting. Pass the user's name in the
+      `request` argument. To let the greeter see a file the user attached,
+      list its index or filename in the optional `attachments` array.
 
 tools:
   - name: current_time

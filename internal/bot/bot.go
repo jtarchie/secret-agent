@@ -4,6 +4,7 @@ package bot
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -12,10 +13,29 @@ import (
 )
 
 type Bot struct {
-	Name   string `yaml:"name"`
-	System string `yaml:"system"`
-	Tools  []Tool `yaml:"tools"`
+	Name   string              `yaml:"name"`
+	System string              `yaml:"system"`
+	Tools  []Tool              `yaml:"tools"`
+	Agents map[string]AgentRef `yaml:"agents"`
 }
+
+// AgentRef is a reference to a sub-agent defined in its own YAML file.
+// The map key under `agents:` becomes the tool name the parent LLM sees,
+// independent of the child's own `name:` field.
+type AgentRef struct {
+	File              string `yaml:"file"`
+	Description       string `yaml:"description"`
+	SkipSummarization bool   `yaml:"skip_summarization"`
+	// Attachments, when true, exposes an optional `attachments` parameter to
+	// the parent LLM so it can opt-in to forwarding current-turn attachments
+	// to the sub-agent. Default false: the sub-agent never sees attachments.
+	Attachments bool `yaml:"attachments"`
+
+	// Bot is the resolved child bot, populated by Load. Not read from YAML.
+	Bot *Bot `yaml:"-"`
+}
+
+const maxAgentDepth = 8
 
 type Tool struct {
 	Name        string           `yaml:"name"`
@@ -150,7 +170,24 @@ func (p *Param) validate(toolName, paramName string) error {
 }
 
 func Load(path string) (*Bot, error) {
-	data, err := os.ReadFile(path)
+	return loadBot(path, map[string]bool{}, 0)
+}
+
+func loadBot(path string, visited map[string]bool, depth int) (*Bot, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return nil, fmt.Errorf("resolve %s: %w", path, err)
+	}
+	if visited[abs] {
+		return nil, fmt.Errorf("agent cycle detected at %s", abs)
+	}
+	if depth > maxAgentDepth {
+		return nil, fmt.Errorf("agent nesting depth exceeded at %s (max %d)", abs, maxAgentDepth)
+	}
+	visited[abs] = true
+	defer delete(visited, abs)
+
+	data, err := os.ReadFile(abs)
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", path, err)
 	}
@@ -186,6 +223,37 @@ func Load(path string) (*Bot, error) {
 				return nil, fmt.Errorf("%s: %w", path, err)
 			}
 		}
+	}
+
+	toolNames := make(map[string]struct{}, len(b.Tools))
+	for _, t := range b.Tools {
+		toolNames[t.Name] = struct{}{}
+	}
+
+	dir := filepath.Dir(abs)
+	for key, ref := range b.Agents {
+		if !paramNameRe.MatchString(key) {
+			return nil, fmt.Errorf("%s: agent %q: name must match [A-Za-z_][A-Za-z0-9_]*", path, key)
+		}
+		if _, clash := toolNames[key]; clash {
+			return nil, fmt.Errorf("%s: agent %q conflicts with a tool of the same name", path, key)
+		}
+		ref.File = strings.TrimSpace(ref.File)
+		ref.Description = strings.TrimSpace(ref.Description)
+		if ref.File == "" {
+			return nil, fmt.Errorf("%s: agent %q: file is required", path, key)
+		}
+
+		childPath := ref.File
+		if !filepath.IsAbs(childPath) {
+			childPath = filepath.Join(dir, childPath)
+		}
+		child, err := loadBot(childPath, visited, depth+1)
+		if err != nil {
+			return nil, fmt.Errorf("agent %q: %w", key, err)
+		}
+		ref.Bot = child
+		b.Agents[key] = ref
 	}
 
 	return &b, nil

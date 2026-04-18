@@ -1,0 +1,7 @@
+- interface with whatsapp
+- support secrets via environment variables
+- cron scheduling?
+- expr and JS (goja?) support
+- hooks
+- withing a container image / Dockerfile
+- MCPs of course

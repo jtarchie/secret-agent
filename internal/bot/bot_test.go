@@ -84,6 +84,143 @@ tools:
 	}
 }
 
+func writeFile(t *testing.T, dir, name, body string) string {
+	t.Helper()
+	p := filepath.Join(dir, name)
+	if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+		t.Fatalf("write %s: %v", name, err)
+	}
+	return p
+}
+
+func TestLoadAgents(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "child.yml", `
+name: child
+system: You are a greeter.
+`)
+	parent := writeFile(t, dir, "parent.yml", `
+name: parent
+system: You coordinate.
+agents:
+  greeter:
+    file: ./child.yml
+    description: Greets the user.
+    skip_summarization: true
+`)
+
+	b, err := Load(parent)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	ref, ok := b.Agents["greeter"]
+	if !ok {
+		t.Fatal("missing greeter")
+	}
+	if ref.Description != "Greets the user." {
+		t.Errorf("desc = %q", ref.Description)
+	}
+	if !ref.SkipSummarization {
+		t.Error("skip_summarization should be true")
+	}
+	if ref.Bot == nil || ref.Bot.Name != "child" {
+		t.Errorf("child not resolved: %+v", ref.Bot)
+	}
+}
+
+func TestLoadAgentsMissingFile(t *testing.T) {
+	dir := t.TempDir()
+	parent := writeFile(t, dir, "parent.yml", `
+name: parent
+system: s
+agents:
+  missing:
+    file: ./nope.yml
+`)
+	_, err := Load(parent)
+	if err == nil {
+		t.Fatal("expected error for missing child")
+	}
+	if !strings.Contains(err.Error(), "missing") {
+		t.Errorf("error should name the agent: %v", err)
+	}
+}
+
+func TestLoadAgentsCycle(t *testing.T) {
+	dir := t.TempDir()
+	a := filepath.Join(dir, "a.yml")
+	b := filepath.Join(dir, "b.yml")
+	if err := os.WriteFile(a, []byte(`
+name: a
+system: s
+agents:
+  bb:
+    file: ./b.yml
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(b, []byte(`
+name: b
+system: s
+agents:
+  aa:
+    file: ./a.yml
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Load(a)
+	if err == nil {
+		t.Fatal("expected cycle error")
+	}
+	if !strings.Contains(err.Error(), "cycle") {
+		t.Errorf("error should mention cycle: %v", err)
+	}
+}
+
+func TestLoadAgentsCollidesWithTool(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "child.yml", `
+name: child
+system: s
+`)
+	parent := writeFile(t, dir, "parent.yml", `
+name: parent
+system: s
+tools:
+  - name: greeter
+    sh: echo hi
+agents:
+  greeter:
+    file: ./child.yml
+`)
+	_, err := Load(parent)
+	if err == nil {
+		t.Fatal("expected collision error")
+	}
+	if !strings.Contains(err.Error(), "conflicts") {
+		t.Errorf("error should mention conflict: %v", err)
+	}
+}
+
+func TestLoadAgentsInvalidName(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "child.yml", `
+name: child
+system: s
+`)
+	parent := writeFile(t, dir, "parent.yml", `
+name: parent
+system: s
+agents:
+  "bad-name":
+    file: ./child.yml
+`)
+	_, err := Load(parent)
+	if err == nil {
+		t.Fatal("expected name validation error")
+	}
+}
+
 func TestLoadAttachmentRejectsDefaultMapping(t *testing.T) {
 	p := writeBot(t, `
 name: b
