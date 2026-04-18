@@ -90,7 +90,113 @@ with `type: attachment` (see `file_info` in [examples/hello-world.yml](examples/
 receive the resolved path as an env var — the model picks the attachment
 by index (`"0"`) or filename.
 
-## Bot definition
+## Bot definition (YAML)
 
-See [examples/hello-world.yml](examples/hello-world.yml) for the YAML
-schema (name, system prompt, shell-backed tools with typed params).
+See [examples/](examples/) for runnable configs. Full field reference below.
+
+### Top-level fields
+
+| Field | Type | Required | Purpose |
+|---|---|---|---|
+| `name` | string | yes | Bot identifier (must match `[A-Za-z_][A-Za-z0-9_]*`). |
+| `system` | string | yes | System prompt / instructions for the LLM. |
+| `triggers` | []string | no | Signal-only: words that gate a response (word-boundary, case-insensitive). |
+| `permissions` | object | no | See *Permissions*. |
+| `tools` | []Tool | no | Shell/expr/JS tools the bot can call. |
+| `agents` | map[string]AgentRef | no | Sub-agents callable as tools (max nesting 8, no cycles). |
+| `hooks` | []Hook | no | Bot-level callbacks (before/after model, tool, agent). |
+| `mcp` | []MCPServer | no | External MCP servers to expose. |
+
+### Permissions
+
+| Field | Type | Default | Purpose |
+|---|---|---|---|
+| `attachments` | bool | `true` | Allow inbound attachments to reach the bot. |
+| `memory` | enum | `full` | `full` (per-conversation + buffering), `session` (per-conversation, no buffering), `none` (stateless per turn). |
+
+### Tools
+
+| Field | Type | Purpose |
+|---|---|---|
+| `name` | string | Unique identifier. |
+| `description` | string | Shown to the model. |
+| `sh` / `expr` / `js` | string | Implementation — exactly one required. |
+| `params` | map[string]Param | Typed params (see below). |
+| `hooks` | []Hook | Tool-scoped `before`/`after` hooks. |
+
+Param types: `string`, `integer`, `number`, `boolean`, `attachment`. Shorthand: `string!` (required), `integer=5` (default), `boolean=true`. Enums allowed on `string` only. `required` and `default` are mutually exclusive.
+
+### Agents
+
+| Field | Type | Purpose |
+|---|---|---|
+| `file` | string | Path to sub-agent YAML (relative to parent). |
+| `description` | string | Exposed to parent LLM. |
+| `skip_summarization` | bool | Pass raw output back to parent. |
+| `attachments` | bool | Let parent forward attachments. |
+
+### Hooks
+
+| Field | Type | Purpose |
+|---|---|---|
+| `on` | enum | Bot-level: `before_tool`, `after_tool`, `before_model`, `after_model`, `before_agent`, `after_agent`. Tool-level: `before`, `after`. |
+| `tool` | string | Filter `before_tool`/`after_tool` to one tool. |
+| `sh` / `expr` / `js` | string | Implementation — exactly one required. |
+
+### MCP servers
+
+| Field | Type | Purpose |
+|---|---|---|
+| `name` | string | Unique identifier (namespaces its tools). |
+| `command` + `args` + `env` | | Local stdio subprocess. |
+| `url` + `headers` | | Remote HTTP streamable endpoint. |
+| `tool_filter` | []string | Allowlist of tool names from this server. |
+| `require_confirmation` | bool | Human-in-the-loop gate per call. |
+
+Exactly one of `command` / `url` is required.
+
+## Command-line reference
+
+### `secret-agent run <bot.yml>`
+
+| Flag | Default | Purpose |
+|---|---|---|
+| `--model` | — | **Required.** `provider/model-name` (e.g. `anthropic/claude-sonnet-4-5-20250929`). |
+| `--api-key` | — | **Required.** Model provider API key. |
+| `--base-url` | — | Override provider base URL (e.g. local OpenAI-compatible server). |
+| `--transport` | `cli` | `cli` or `signal`. |
+| `--signal-account` | — | E.164 phone; required when `--transport=signal`. |
+| `--signal-state-dir` | — | signal-cli state dir; required when `--transport=signal`. |
+| `--signal-cli` | `signal-cli` | Path to the signal-cli binary. |
+| `--skip-preflight` | `false` | Skip model endpoint / API key validation at startup. |
+| `--verbose` | `0` | 0=info, 1/2/3=debug with signal-cli `-v` / `-vv` / `-vvv`. |
+
+### `secret-agent signal-link`
+
+| Flag | Default | Purpose |
+|---|---|---|
+| `--signal-state-dir` | — | **Required.** Dir to write keys/ratchet state (created `0700` if missing). |
+| `--signal-device-name` | `secret-agent` | Name shown on the primary device. |
+| `--signal-cli` | `signal-cli` | Path to the signal-cli binary. |
+| `--no-qr` | `false` | Print only the `sgnl://` URI, suppress QR block. |
+| `--verbose` | `0` | 0=info, 1=debug. |
+
+## Interface features
+
+### Terminal CLI
+
+- **Slash commands:** `/help`, `/clear`, `/copy` (last reply to clipboard), `/mouse` (toggle mouse mode, disables native text selection), `/quit` / `/exit`.
+- **Keybindings:** `Enter` send · `Alt+Enter` newline · `↑`/`↓` input history · `PgUp`/`PgDn` scroll · `Ctrl+U`/`Ctrl+D` half-page · `Ctrl+C` cancel turn / quit · `Esc` quit.
+- **Display:** streaming chunks, glamour-rendered markdown, colored roles (user=cyan, bot=magenta, errors=red), spinner while waiting, auto-scroll on new content.
+- **Attachments:** `#file:<path>` inline; quote paths with spaces. Tools with `type: attachment` receive the resolved path.
+- **Conversation:** one in-memory session id `local`, cleared on exit.
+
+### Signal
+
+- **Message scopes:** DMs (always replied to), groups (only when a `triggers` word matches — never auto-reply), Note-to-Self (own sent echoes suppressed for 2 min).
+- **Triggers:** optional per-bot allowlist; word-boundary regex, case-insensitive. Empty list = reply to every DM.
+- **Buffering:** per-peer FIFO (capacity 10) accumulates un-triggered messages and flushes them inside a `<previous_messages>` block on the next trigger. Disable with `permissions.memory: session` / `none`. Text only; never applied across group members.
+- **Attachments:** inbound files downloaded by signal-cli and resolved to `<state-dir>/attachments/<id>`. Strip at transport with `permissions.attachments: false`.
+- **Per-peer isolation:** one in-memory conversation per Signal contact (keyed by ACI UUID), mutex-serialized so multi-chunk replies don't interleave.
+- **Linking:** `signal-link` prints a `sgnl://linkdevice?...` URI and an inline QR (use `--no-qr` for headless).
+- **Shutdown:** SIGINT + 5 s grace lets ratchet state flush.
