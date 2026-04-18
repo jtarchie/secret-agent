@@ -173,6 +173,13 @@ type dataMessage struct {
 	Message     string         `json:"message"`
 	GroupInfo   *groupInfo     `json:"groupInfo,omitempty"`
 	Attachments []signalAttach `json:"attachments,omitempty"`
+
+	// Destination* are populated on syncMessage.sentMessage — they describe
+	// who the primary device sent the message to. For Note-to-Self the
+	// destination matches the account itself.
+	Destination       string `json:"destination,omitempty"`
+	DestinationNumber string `json:"destinationNumber,omitempty"`
+	DestinationUuid   string `json:"destinationUuid,omitempty"`
 }
 
 type signalAttach struct {
@@ -188,7 +195,10 @@ type groupInfo struct {
 }
 
 // syncMessage is set for messages originating from other devices on the
-// same account (e.g. the primary phone sending to someone else). Ignored.
+// same account — e.g. the primary phone sending a DM to a contact, or
+// sending a message to "Note to Self". Most of these are echoes we skip;
+// the Note-to-Self case is the one we actually want to handle so that
+// users can test the bot by messaging themselves.
 type syncMessage struct {
 	SentMessage *dataMessage `json:"sentMessage,omitempty"`
 }
@@ -228,4 +238,38 @@ func (e envelope) peerRecipient() string {
 		return e.Source
 	}
 	return e.SourceUuid
+}
+
+// effectiveDataMessage returns the DataMessage we should treat as the user's
+// input, preferring a direct DataMessage and falling back to a
+// SyncMessage.SentMessage (used for Note-to-Self). Returns nil when the
+// envelope carries neither.
+func (e envelope) effectiveDataMessage() *dataMessage {
+	if e.DataMessage != nil {
+		return e.DataMessage
+	}
+	if e.SyncMessage != nil {
+		return e.SyncMessage.SentMessage
+	}
+	return nil
+}
+
+// isSyncFromSelf reports whether this envelope is a sync echo — i.e. a
+// message that originated on another device of this same account. The
+// caller uses this to decide whether to treat the sentMessage as Note-to-
+// Self (destination == account) or to drop it (destination == someone else,
+// or destination == account but it is our own outbound echo).
+func (e envelope) isSyncFromSelf() bool {
+	return e.DataMessage == nil && e.SyncMessage != nil && e.SyncMessage.SentMessage != nil
+}
+
+// destinationMatches reports whether the SentMessage's destination equals
+// the given account (phone or UUID). Used to detect Note-to-Self.
+func (d *dataMessage) destinationMatches(account string) bool {
+	if d == nil || account == "" {
+		return false
+	}
+	return d.Destination == account ||
+		d.DestinationNumber == account ||
+		d.DestinationUuid == account
 }

@@ -28,8 +28,16 @@ type Transport struct {
 
 	triggers []string
 	matcher  *triggerMatcher
-	buffers  sync.Map // peerID → *peerBuffer
+	buffers  sync.Map // convKey → *peerBuffer
+
+	// outbound tracks message bodies we recently sent, keyed by body. Used
+	// to suppress sync.sentMessage echoes of our own Note-to-Self replies.
+	outbound sync.Map // string → time.Time
 }
+
+// outboundEchoTTL bounds how long we'll treat a sync.sentMessage as an
+// echo of one of our own recent sends.
+const outboundEchoTTL = 2 * time.Minute
 
 type Option func(*Transport)
 
@@ -153,6 +161,15 @@ func (t *Transport) Run(ctx context.Context, botName string, newHandler chat.Han
 	}
 }
 
+// conversation describes where an incoming message belongs and how the
+// bot should reply to it. Exactly one of recipient / groupID is set.
+type conversation struct {
+	key       string // stable key for session + buffer lookup
+	kind      string // "dm" | "group" | "self" (for logs)
+	recipient string // used for DM and Note-to-Self sends
+	groupID   string // used for group sends
+}
+
 func (t *Transport) dispatchReceive(
 	ctx context.Context,
 	log *slog.Logger,
@@ -168,62 +185,158 @@ func (t *Transport) dispatchReceive(
 	}
 	env := rp.Envelope
 
-	if env.DataMessage == nil {
-		log.Debug("ignoring envelope with no dataMessage",
+	dm := env.effectiveDataMessage()
+	if dm == nil {
+		log.Debug("ignoring envelope with no data",
 			"source", env.peerID(),
 			"sync", env.SyncMessage != nil,
 		)
 		return
 	}
-	if env.DataMessage.GroupInfo != nil {
-		log.Debug("ignoring group message",
-			"source", env.peerID(),
-			"group_id", env.DataMessage.GroupInfo.GroupID,
-		)
-		return
-	}
 
-	text := strings.TrimSpace(env.DataMessage.Message)
-	atts := t.attachmentsFor(env.DataMessage.Attachments)
+	text := strings.TrimSpace(dm.Message)
+	atts := t.attachmentsFor(dm.Attachments)
 	if text == "" && len(atts) == 0 {
 		log.Debug("ignoring empty message", "source", env.peerID())
 		return
 	}
 
-	peerID := env.peerID()
-	recipient := env.peerRecipient()
-	if peerID == "" || recipient == "" {
-		log.Warn("dropping message with no source")
+	conv, ok := t.classify(env, dm, log, text)
+	if !ok {
 		return
 	}
 
-	buf := t.bufferFor(peerID)
-	if t.matcher != nil && !t.matcher.Matches(text) {
-		buf.Append(text)
-		log.Info("buffered untriggered message",
-			"peer", peerID,
-			"bytes", len(text),
-			"dropped_attachments", len(atts),
-		)
-		return
+	// Group messages require an explicit trigger. Without one configured,
+	// stay silent — otherwise the bot would reply to every group message,
+	// which is the behavior the trigger feature exists to avoid.
+	if conv.kind == "group" {
+		if t.matcher == nil {
+			log.Debug("ignoring group message: no trigger configured",
+				"group_id", conv.groupID,
+			)
+			return
+		}
+		if !t.matcher.Matches(text) {
+			log.Debug("ignoring untriggered group message",
+				"group_id", conv.groupID,
+			)
+			return
+		}
+		// Intentional: no buffering across group members — bundling
+		// messages from different senders as prior context is confusing
+		// and the semantics get thorny fast.
+	} else {
+		buf := t.bufferFor(conv.key)
+		if t.matcher != nil && !t.matcher.Matches(text) {
+			buf.Append(text)
+			log.Info("buffered untriggered message",
+				"conv", conv.key,
+				"kind", conv.kind,
+				"bytes", len(text),
+				"dropped_attachments", len(atts),
+			)
+			return
+		}
+		if prior := buf.Drain(); len(prior) > 0 {
+			log.Info("flushing buffered prior messages into turn",
+				"conv", conv.key,
+				"kind", conv.kind,
+				"prior_count", len(prior),
+			)
+			text = wrapWithPrior(prior, text)
+		}
 	}
 
-	if prior := buf.Drain(); len(prior) > 0 {
-		log.Info("flushing buffered prior messages into turn",
-			"peer", peerID,
-			"prior_count", len(prior),
-		)
-		text = wrapWithPrior(prior, text)
-	}
-
-	log.Info("received DM",
-		"peer", peerID,
+	log.Info("received message",
+		"conv", conv.key,
+		"kind", conv.kind,
 		"source_name", env.SourceName,
 		"bytes", len(text),
 		"attachments", len(atts),
 	)
 	msg := chat.Message{Text: text, Attachments: atts}
-	go t.handleDM(ctx, log, cli, newHandler(peerID), lockFor(peerID), peerID, recipient, msg)
+	go t.handleDM(ctx, log, cli, newHandler(conv.key), lockFor(conv.key), conv, msg)
+}
+
+// classify inspects an envelope and decides how to route it. Returns
+// ok=false when the envelope should be dropped (outbound echo, a sync
+// message destined for someone else, or a missing source).
+func (t *Transport) classify(env envelope, dm *dataMessage, log *slog.Logger, text string) (conversation, bool) {
+	// Group: the clearest signal, both for regular and sync data messages.
+	if dm.GroupInfo != nil && dm.GroupInfo.GroupID != "" {
+		return conversation{
+			key:     "group:" + dm.GroupInfo.GroupID,
+			kind:    "group",
+			groupID: dm.GroupInfo.GroupID,
+		}, true
+	}
+
+	// Sync-from-self: either a Note-to-Self we should accept, or an echo
+	// of our own reply, or a DM the primary device sent to someone else
+	// (which we must not treat as bot input).
+	if env.isSyncFromSelf() {
+		if !dm.destinationMatches(t.account) {
+			log.Debug("ignoring sync sentMessage to external destination",
+				"destination", dm.Destination,
+			)
+			return conversation{}, false
+		}
+		if t.isOwnEcho(text) {
+			log.Debug("ignoring sync sentMessage echo of our own reply")
+			return conversation{}, false
+		}
+		return conversation{
+			key:       "self:" + t.account,
+			kind:      "self",
+			recipient: t.account,
+		}, true
+	}
+
+	// Plain DM.
+	peerID := env.peerID()
+	recipient := env.peerRecipient()
+	if peerID == "" || recipient == "" {
+		log.Warn("dropping message with no source")
+		return conversation{}, false
+	}
+	return conversation{
+		key:       peerID,
+		kind:      "dm",
+		recipient: recipient,
+	}, true
+}
+
+// isOwnEcho reports whether `body` matches a recently-sent outbound message
+// within outboundEchoTTL. Used to suppress Note-to-Self sync echoes.
+func (t *Transport) isOwnEcho(body string) bool {
+	v, ok := t.outbound.Load(body)
+	if !ok {
+		return false
+	}
+	sent, _ := v.(time.Time)
+	if time.Since(sent) > outboundEchoTTL {
+		t.outbound.Delete(body)
+		return false
+	}
+	// One-shot: the echo usually only arrives once. Delete so a future
+	// identical user message still triggers the bot.
+	t.outbound.Delete(body)
+	return true
+}
+
+// rememberOutbound records a reply we just sent so an incoming sync echo
+// of it can be suppressed. Periodic cleanup trims expired entries.
+func (t *Transport) rememberOutbound(body string) {
+	now := time.Now()
+	t.outbound.Store(body, now)
+	// Opportunistic GC — avoids an unbounded map in long-running processes
+	// where replies keep expiring without incoming sync echoes.
+	t.outbound.Range(func(k, v any) bool {
+		if ts, ok := v.(time.Time); ok && now.Sub(ts) > outboundEchoTTL {
+			t.outbound.Delete(k)
+		}
+		return true
+	})
 }
 
 // bufferFor returns the per-peer message buffer, creating it on first use.
@@ -261,10 +374,10 @@ func (t *Transport) handleDM(
 	cli *client,
 	handler chat.Handler,
 	peerLock *sync.Mutex,
-	peerID, recipient string,
+	conv conversation,
 	userMsg chat.Message,
 ) {
-	peerLog := log.With("peer", peerID)
+	peerLog := log.With("conv", conv.key, "kind", conv.kind)
 	start := time.Now()
 	peerLog.Debug("handler: start", "bytes_in", len(userMsg.Text), "attachments", len(userMsg.Attachments))
 
@@ -301,11 +414,23 @@ func (t *Transport) handleDM(
 	peerLock.Lock()
 	defer peerLock.Unlock()
 
+	params := sendParams{Message: body}
+	switch {
+	case conv.groupID != "":
+		params.GroupID = conv.groupID
+	case conv.recipient != "":
+		params.Recipient = []string{conv.recipient}
+	default:
+		peerLog.Error("handler: no reply target — nothing to send")
+		return
+	}
+
+	if conv.kind == "self" {
+		t.rememberOutbound(body)
+	}
+
 	sendStart := time.Now()
-	if _, err := cli.call("send", sendParams{
-		Recipient: []string{recipient},
-		Message:   body,
-	}); err != nil {
+	if _, err := cli.call("send", params); err != nil {
 		peerLog.Error("send failed", "err", err, "duration", time.Since(sendStart))
 		return
 	}
