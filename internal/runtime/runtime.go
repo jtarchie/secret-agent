@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 
 	"google.golang.org/adk/agent"
@@ -98,7 +99,8 @@ func (r *Runtime) HandlerFor(convID string) chat.Handler {
 				emit(chat.Chunk{Err: err})
 				return
 			}
-			for ev, err := range r.runner.Run(ctx, convID, convID, msg, agent.RunConfig{}) {
+			runCtx := tool.WithAttachments(ctx, userMsg.Attachments)
+			for ev, err := range r.runner.Run(runCtx, convID, convID, msg, agent.RunConfig{}) {
 				if err != nil {
 					emit(chat.Chunk{Err: err})
 					return
@@ -122,28 +124,85 @@ func (r *Runtime) HandlerFor(convID string) chat.Handler {
 }
 
 // buildUserContent composes a user-role genai.Content from a chat.Message.
-// Attachments are loaded from disk and attached as inline bytes; the MIME
-// type is sniffed from the content when the transport did not supply one.
+// A manifest block is prepended to the text so the model can reference
+// attachments by index or filename when calling tools. Text-typed
+// attachments are inlined into the text part (broadly compatible with
+// OpenAI-compatible servers that only accept "text" and "image_url" content
+// types). Binary attachments ride along as genai InlineData parts.
 func buildUserContent(msg chat.Message) (*genai.Content, error) {
 	if len(msg.Attachments) == 0 {
 		return genai.NewContentFromText(msg.Text, genai.RoleUser), nil
 	}
-	parts := make([]*genai.Part, 0, len(msg.Attachments)+1)
-	if msg.Text != "" {
-		parts = append(parts, genai.NewPartFromText(msg.Text))
+
+	type loaded struct {
+		a      chat.Attachment
+		data   []byte
+		mime   string
+		inline bool
 	}
+	items := make([]loaded, 0, len(msg.Attachments))
 	for _, a := range msg.Attachments {
 		data, err := os.ReadFile(a.Path)
 		if err != nil {
 			return nil, fmt.Errorf("read attachment %s: %w", a.Path, err)
 		}
-		ct := a.ContentType
-		if ct == "" {
-			ct = http.DetectContentType(data)
+		mime := a.ContentType
+		if mime == "" {
+			mime = http.DetectContentType(data)
 		}
-		parts = append(parts, genai.NewPartFromBytes(data, ct))
+		items = append(items, loaded{a: a, data: data, mime: mime, inline: isTextMime(mime)})
+	}
+
+	var buf strings.Builder
+	buf.WriteString("<attachments>\n")
+	for i, it := range items {
+		name := it.a.Filename
+		if name == "" {
+			name = "(unnamed)"
+		}
+		fmt.Fprintf(&buf, "- index=%d filename=%q type=%q\n", i, name, it.mime)
+	}
+	buf.WriteString("</attachments>")
+
+	for i, it := range items {
+		if !it.inline {
+			continue
+		}
+		name := it.a.Filename
+		if name == "" {
+			name = "(unnamed)"
+		}
+		fmt.Fprintf(&buf, "\n\n<attachment index=%d filename=%q>\n%s\n</attachment>", i, name, string(it.data))
+	}
+
+	if msg.Text != "" {
+		buf.WriteString("\n\n")
+		buf.WriteString(msg.Text)
+	}
+
+	parts := []*genai.Part{genai.NewPartFromText(buf.String())}
+	for _, it := range items {
+		if it.inline {
+			continue
+		}
+		parts = append(parts, genai.NewPartFromBytes(it.data, it.mime))
 	}
 	return genai.NewContentFromParts(parts, genai.RoleUser), nil
+}
+
+// isTextMime reports whether a MIME type should be inlined as text rather
+// than shipped as binary InlineData. We treat anything starting with "text/"
+// plus common JSON / XML variants as text.
+func isTextMime(mime string) bool {
+	base, _, _ := strings.Cut(mime, ";")
+	base = strings.TrimSpace(base)
+	switch base {
+	case "application/json", "application/xml", "application/yaml",
+		"application/x-yaml", "application/javascript", "application/sh",
+		"application/x-sh":
+		return true
+	}
+	return strings.HasPrefix(base, "text/")
 }
 
 func (r *Runtime) ensureSession(ctx context.Context, convID string) error {

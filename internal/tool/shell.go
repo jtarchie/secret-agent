@@ -45,6 +45,7 @@ func NewShell(name, description, script string, params map[string]bot.Param) (ad
 		},
 		func(ctx adktool.Context, args map[string]any) (shellResult, error) {
 			env := os.Environ()
+			atts := AttachmentsFromContext(ctx)
 			for paramName, p := range params {
 				value, ok := args[paramName]
 				if !ok || value == nil {
@@ -54,7 +55,15 @@ func NewShell(name, description, script string, params map[string]bot.Param) (ad
 						continue
 					}
 				}
-				s, err := toEnvString(value, p.Type)
+				var (
+					s   string
+					err error
+				)
+				if p.Type == bot.ParamAttachment {
+					s, err = resolveAttachment(value, atts)
+				} else {
+					s, err = toEnvString(value, p.Type)
+				}
 				if err != nil {
 					return shellResult{}, fmt.Errorf("%s: param %q: %w", name, paramName, err)
 				}
@@ -84,9 +93,18 @@ func buildSchema(params map[string]bot.Param) (*jsonschema.Schema, error) {
 	}
 	s.Properties = make(map[string]*jsonschema.Schema, len(params))
 	for name, p := range params {
+		schemaType := string(p.Type)
+		desc := p.Description
+		if p.Type == bot.ParamAttachment {
+			schemaType = "string"
+			if desc == "" {
+				desc = "an attachment from the current turn"
+			}
+			desc += " — pass the attachment index (e.g. \"0\") or filename"
+		}
 		prop := &jsonschema.Schema{
-			Type:        string(p.Type),
-			Description: p.Description,
+			Type:        schemaType,
+			Description: desc,
 			Enum:        p.Enum,
 		}
 		if p.Default != nil {

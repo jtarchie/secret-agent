@@ -14,3 +14,10 @@ tools:
       who: string!
     sh: |
       echo "Hello, $who!"
+  - name: file_info
+    description: Report the size (bytes) and first line of an attached file.
+    params:
+      file: attachment!
+    sh: |
+      echo "size: $(wc -c < "$file") bytes"
+      echo "first line: $(head -n 1 "$file")"

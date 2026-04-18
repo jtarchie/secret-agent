@@ -27,10 +27,11 @@ type Tool struct {
 type ParamType string
 
 const (
-	ParamString  ParamType = "string"
-	ParamInteger ParamType = "integer"
-	ParamNumber  ParamType = "number"
-	ParamBoolean ParamType = "boolean"
+	ParamString     ParamType = "string"
+	ParamInteger    ParamType = "integer"
+	ParamNumber     ParamType = "number"
+	ParamBoolean    ParamType = "boolean"
+	ParamAttachment ParamType = "attachment"
 )
 
 type Param struct {
@@ -42,7 +43,7 @@ type Param struct {
 }
 
 var (
-	shorthandRe    = regexp.MustCompile(`^(string|integer|number|boolean)(!)?(?:=(.*))?$`)
+	shorthandRe    = regexp.MustCompile(`^(string|integer|number|boolean|attachment)(!)?(?:=(.*))?$`)
 	paramNameRe    = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 	reservedParams = map[string]struct{}{
 		"path": {}, "home": {}, "user": {}, "shell": {}, "pwd": {},
@@ -99,15 +100,17 @@ func coerceScalar(s string, t ParamType) (any, error) {
 		return strconv.ParseFloat(s, 64)
 	case ParamBoolean:
 		return strconv.ParseBool(s)
+	case ParamAttachment:
+		return nil, fmt.Errorf("attachment params cannot have a default")
 	}
 	return nil, fmt.Errorf("unknown type %q", t)
 }
 
 func (p *Param) validate(toolName, paramName string) error {
 	switch p.Type {
-	case ParamString, ParamInteger, ParamNumber, ParamBoolean:
+	case ParamString, ParamInteger, ParamNumber, ParamBoolean, ParamAttachment:
 	default:
-		return fmt.Errorf("tool %q param %q: unknown type %q (want string|integer|number|boolean)", toolName, paramName, p.Type)
+		return fmt.Errorf("tool %q param %q: unknown type %q (want string|integer|number|boolean|attachment)", toolName, paramName, p.Type)
 	}
 
 	if !paramNameRe.MatchString(paramName) {
@@ -119,6 +122,10 @@ func (p *Param) validate(toolName, paramName string) error {
 
 	if p.Required && p.Default != nil {
 		return fmt.Errorf("tool %q param %q: required and default are mutually exclusive", toolName, paramName)
+	}
+
+	if p.Type == ParamAttachment && p.Default != nil {
+		return fmt.Errorf("tool %q param %q: attachment type cannot have a default", toolName, paramName)
 	}
 
 	if len(p.Enum) > 0 {

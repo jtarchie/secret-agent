@@ -75,6 +75,21 @@ Each Signal contact gets its own in-memory conversation context
 `--transport cli` is the default. Slash commands: `/help`, `/clear`,
 `/copy`, `/quit`.
 
+### Attaching files
+
+Reference a local file inline with `#file:<path>`. The token is replaced
+with `[attached: <name>]` in the text and the file is sent alongside the
+message:
+
+```
+summarize #file:./notes.md please
+```
+
+Quote paths that contain spaces: `#file:"my notes.md"`. Tools declared
+with `type: attachment` (see `file_info` in [examples/hello-world.yml](examples/hello-world.yml))
+receive the resolved path as an env var — the model picks the attachment
+by index (`"0"`) or filename.
+
 ## Bot definition
 
 See [examples/hello-world.yml](examples/hello-world.yml) for the YAML
