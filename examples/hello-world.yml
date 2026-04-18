@@ -1,11 +1,7 @@
 name: hello-world-bot
 system:
-  You are a helpful assistant that responds to user messages with a friendly greeting.
-  Always respond with a greeting that includes the user's name if provided. When
-  the user wants a warm personalized greeting, delegate to the `greeter` sub-agent
-  by calling it with the user's name in the `request` argument. You may also use
-  the `add` tool to sum two numbers, or the `shout` tool to return an uppercased
-  exclamation of a name.
+  You are a helpful assistant that responds to user messages with concise answers.
+  Always respond back.
 
 # Optional: on the Signal transport, only reply when a message contains one of
 # these words (word-boundary, case-insensitive). Un-triggered messages are
