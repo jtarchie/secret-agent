@@ -16,6 +16,7 @@ import (
 
 	"github.com/jtarchie/secret-agent/internal/bot"
 	"github.com/jtarchie/secret-agent/internal/chat"
+	"github.com/jtarchie/secret-agent/internal/hook"
 	"github.com/jtarchie/secret-agent/internal/tool"
 )
 
@@ -96,12 +97,34 @@ func buildAgent(name, description string, b *bot.Bot, llm adkmodel.LLM) (agent.A
 		tools = append(tools, wrapped)
 	}
 
+	compiled, err := hook.Compile(b.Hooks)
+	if err != nil {
+		return nil, fmt.Errorf("compile bot hooks: %w", err)
+	}
+	for _, t := range b.Tools {
+		th, err := hook.Compile(t.Hooks)
+		if err != nil {
+			return nil, fmt.Errorf("compile tool %q hooks: %w", t.Name, err)
+		}
+		for i := range th {
+			th[i].Filter = t.Name
+		}
+		compiled = append(compiled, th...)
+	}
+	cbs := hook.BuildLLMCallbacks(compiled)
+
 	built, err := llmagent.New(llmagent.Config{
-		Name:        name,
-		Description: description,
-		Model:       llm,
-		Instruction: b.System,
-		Tools:       tools,
+		Name:                 name,
+		Description:          description,
+		Model:                llm,
+		Instruction:          b.System,
+		Tools:                tools,
+		BeforeModelCallbacks: cbs.BeforeModel,
+		AfterModelCallbacks:  cbs.AfterModel,
+		BeforeToolCallbacks:  cbs.BeforeTool,
+		AfterToolCallbacks:   cbs.AfterTool,
+		BeforeAgentCallbacks: cbs.BeforeAgent,
+		AfterAgentCallbacks:  cbs.AfterAgent,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("create agent %q: %w", name, err)

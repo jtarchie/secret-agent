@@ -1,0 +1,47 @@
+name: hooked-bot
+system: |
+  For every user message, call the `echo` tool with `msg` set to the user's
+  exact message. Then reply with ONLY the tool's output, verbatim — no
+  quotes, no commentary, no extra words, no greetings. If the tool returns
+  an error, reply with ONLY the error message.
+
+tools:
+  - name: echo
+    description: Echoes the given message back.
+    params:
+      msg: string!
+    sh: |
+      echo "$msg"
+    # Tool-scoped hooks colocate with the tool they wrap. The `on: before|after`
+    # shorthand resolves to before_tool/after_tool for this tool only.
+    #
+    # This `after` hook rewrites the tool's output. Because the system prompt
+    # forces the LLM to reply with the tool output verbatim, the "[hooked] "
+    # marker appears in the CLI — visible proof the hook fired.
+    #
+    # `after_tool` also fires when the tool was vetoed (e.g. by before_tool
+    # below); in that case `result` is an empty object and `error` is set.
+    # Returning null passes through, so the original error propagates to the
+    # LLM unchanged.
+    hooks:
+      - on: after
+        js: |
+          error ? null : ({ output: "[hooked] " + result.output })
+
+# Bot-level hooks can target any event. For before_tool/after_tool, an
+# optional `tool:` filter narrows the hook to a named tool; omit it to
+# apply to all tools.
+hooks:
+  # Veto demo: any message containing "forbidden" is blocked before the
+  # tool runs. The LLM surfaces the error message per the system prompt,
+  # so you see "blocked by before_tool hook" in the CLI.
+  - on: before_tool
+    tool: echo
+    expr: |
+      args.msg contains "forbidden" ? error("blocked by before_tool hook") : nil
+
+  # Side-channel observability. Writes to stderr on each model call.
+  # Run the CLI with stderr visible to watch this fire.
+  - on: before_model
+    sh: |
+      echo "[hook] before_model: model=$MODEL, ctx=$(printf %s "$MESSAGES" | wc -c) bytes" >&2

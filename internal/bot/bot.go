@@ -17,6 +17,30 @@ type Bot struct {
 	System string              `yaml:"system"`
 	Tools  []Tool              `yaml:"tools"`
 	Agents map[string]AgentRef `yaml:"agents"`
+	Hooks  []Hook              `yaml:"hooks"`
+}
+
+// HookEvent names an ADK extension point a hook attaches to.
+type HookEvent string
+
+const (
+	HookBeforeTool  HookEvent = "before_tool"
+	HookAfterTool   HookEvent = "after_tool"
+	HookBeforeModel HookEvent = "before_model"
+	HookAfterModel  HookEvent = "after_model"
+	HookBeforeAgent HookEvent = "before_agent"
+	HookAfterAgent  HookEvent = "after_agent"
+)
+
+// Hook is a user-defined callback attached to an ADK extension point.
+// Exactly one of Sh/Expr/Js is set (same discipline as Tool). Tool is an
+// optional name filter valid only on bot-level tool hooks.
+type Hook struct {
+	On   HookEvent `yaml:"on"`
+	Tool string    `yaml:"tool,omitempty"`
+	Sh   string    `yaml:"sh,omitempty"`
+	Expr string    `yaml:"expr,omitempty"`
+	Js   string    `yaml:"js,omitempty"`
 }
 
 // AgentRef is a reference to a sub-agent defined in its own YAML file.
@@ -44,6 +68,7 @@ type Tool struct {
 	Expr        string           `yaml:"expr"`
 	Js          string           `yaml:"js"`
 	Params      map[string]Param `yaml:"params"`
+	Hooks       []Hook           `yaml:"hooks"`
 }
 
 type ParamType string
@@ -171,6 +196,89 @@ func (p *Param) validate(toolName, paramName string) error {
 	return nil
 }
 
+var allowedBotHookEvents = map[HookEvent]struct{}{
+	HookBeforeTool:  {},
+	HookAfterTool:   {},
+	HookBeforeModel: {},
+	HookAfterModel:  {},
+	HookBeforeAgent: {},
+	HookAfterAgent:  {},
+}
+
+// normalizeToolHook validates a tool-scoped hook and expands the shorthand
+// "before"/"after" values of `on:` to the full event name. Tool-scoped
+// hooks cannot set the `tool:` filter field.
+func normalizeToolHook(h *Hook) error {
+	h.Sh = strings.TrimSpace(h.Sh)
+	h.Expr = strings.TrimSpace(h.Expr)
+	h.Js = strings.TrimSpace(h.Js)
+
+	if h.Tool != "" {
+		return fmt.Errorf("`tool:` filter is only valid on bot-level hooks")
+	}
+
+	switch h.On {
+	case "before", HookBeforeTool:
+		h.On = HookBeforeTool
+	case "after", HookAfterTool:
+		h.On = HookAfterTool
+	case "":
+		return fmt.Errorf("`on:` is required (before|after)")
+	default:
+		return fmt.Errorf("`on: %s` is not valid on a tool-scoped hook (want before|after)", h.On)
+	}
+
+	return validateHookBody(h)
+}
+
+// normalizeBotHook validates a bot-level hook. The `tool:` filter is only
+// valid on tool events and, when present, must name a declared tool.
+func normalizeBotHook(h *Hook, toolNames map[string]struct{}) error {
+	h.Sh = strings.TrimSpace(h.Sh)
+	h.Expr = strings.TrimSpace(h.Expr)
+	h.Js = strings.TrimSpace(h.Js)
+	h.Tool = strings.TrimSpace(h.Tool)
+
+	if h.On == "" {
+		return fmt.Errorf("`on:` is required")
+	}
+	if _, ok := allowedBotHookEvents[h.On]; !ok {
+		return fmt.Errorf("`on: %s` is not a valid event", h.On)
+	}
+
+	if h.Tool != "" {
+		if h.On != HookBeforeTool && h.On != HookAfterTool {
+			return fmt.Errorf("`tool:` filter is only valid on before_tool/after_tool (got %s)", h.On)
+		}
+		if _, ok := toolNames[h.Tool]; !ok {
+			return fmt.Errorf("`tool: %s` does not name a declared tool", h.Tool)
+		}
+	}
+
+	return validateHookBody(h)
+}
+
+func validateHookBody(h *Hook) error {
+	set := []string{}
+	if h.Sh != "" {
+		set = append(set, "sh")
+	}
+	if h.Expr != "" {
+		set = append(set, "expr")
+	}
+	if h.Js != "" {
+		set = append(set, "js")
+	}
+	switch len(set) {
+	case 0:
+		return fmt.Errorf("exactly one of sh, expr, js is required")
+	case 1:
+		return nil
+	default:
+		return fmt.Errorf("only one of sh, expr, js may be set (got %s)", strings.Join(set, ", "))
+	}
+}
+
 func Load(path string) (*Bot, error) {
 	return loadBot(path, map[string]bool{}, 0)
 }
@@ -241,11 +349,24 @@ func loadBot(path string, visited map[string]bool, depth int) (*Bot, error) {
 				return nil, fmt.Errorf("%s: %w", path, err)
 			}
 		}
+		for j := range t.Hooks {
+			h := &t.Hooks[j]
+			if err := normalizeToolHook(h); err != nil {
+				return nil, fmt.Errorf("%s: tool %q hook[%d]: %w", path, t.Name, j, err)
+			}
+		}
 	}
 
 	toolNames := make(map[string]struct{}, len(b.Tools))
 	for _, t := range b.Tools {
 		toolNames[t.Name] = struct{}{}
+	}
+
+	for i := range b.Hooks {
+		h := &b.Hooks[i]
+		if err := normalizeBotHook(h, toolNames); err != nil {
+			return nil, fmt.Errorf("%s: hooks[%d]: %w", path, i, err)
+		}
 	}
 
 	dir := filepath.Dir(abs)
