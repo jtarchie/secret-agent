@@ -72,6 +72,7 @@ func runRun(args []string) error {
 	signalStateDirFlag := fs.String("signal-state-dir", "", "directory for signal-cli state (keys, ratchet state); required for --transport=signal")
 	signalCmdFlag := fs.String("signal-cli", "signal-cli", "path to the signal-cli binary")
 	skipPreflightFlag := fs.Bool("skip-preflight", false, "skip the startup check that verifies the model endpoint is reachable and the API key is valid")
+	mcpPreflightTimeoutFlag := fs.Duration("mcp-preflight-timeout", 5*time.Second, "per-server timeout for the startup MCP tool-listing probe; 0 disables the deadline")
 	verboseFlag := fs.Int("verbose", 0, "verbosity: 0 info, 1 debug + signal-cli -v, 2 debug + signal-cli -vv, 3 debug + signal-cli -vvv")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -109,6 +110,12 @@ func runRun(args []string) error {
 	rt, err := runtime.New(ctx, b, llm)
 	if err != nil {
 		return err
+	}
+
+	if !*skipPreflightFlag {
+		if err := rt.PreflightMCP(ctx, *mcpPreflightTimeoutFlag); err != nil {
+			return fmt.Errorf("mcp preflight failed (use --skip-preflight to bypass): %w", err)
+		}
 	}
 
 	attachmentsOK := b.Permissions.AttachmentsAllowed()

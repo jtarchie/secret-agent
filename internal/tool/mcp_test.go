@@ -1,9 +1,16 @@
 package tool
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
+
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"google.golang.org/adk/agent"
+	adktool "google.golang.org/adk/tool"
+	"google.golang.org/adk/tool/mcptoolset"
 
 	"github.com/jtarchie/secret-agent/internal/bot"
 )
@@ -79,6 +86,61 @@ func TestHeaderHTTPClientEmptyMapReturnsDefault(t *testing.T) {
 	}
 	if newHeaderHTTPClient(map[string]string{}) != http.DefaultClient {
 		t.Error("empty headers should return http.DefaultClient")
+	}
+}
+
+func TestPreflightMCPSuccess(t *testing.T) {
+	clientT, serverT := mcp.NewInMemoryTransports()
+
+	srv := mcp.NewServer(&mcp.Implementation{Name: "preflight-srv", Version: "0.0.1"}, nil)
+	mcp.AddTool(srv, &mcp.Tool{Name: "ping"}, func(_ context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, any, error) {
+		return &mcp.CallToolResult{}, nil, nil
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	go func() { _ = srv.Run(ctx, serverT) }()
+
+	ts, err := mcptoolset.New(mcptoolset.Config{Transport: clientT})
+	if err != nil {
+		t.Fatalf("mcptoolset.New: %v", err)
+	}
+
+	if err := PreflightMCP(ctx, ts); err != nil {
+		t.Fatalf("PreflightMCP: %v", err)
+	}
+}
+
+// blockingToolset is a context-respecting tool.Toolset stand-in used to
+// verify PreflightMCP honors its context deadline without relying on the
+// MCP Go SDK's HTTP retry/close semantics.
+type blockingToolset struct{}
+
+func (blockingToolset) Name() string        { return "blocking" }
+func (blockingToolset) Description() string { return "blocks until context is done" }
+func (blockingToolset) IsLongRunning() bool { return false }
+func (blockingToolset) Tools(ctx agent.ReadonlyContext) ([]adktool.Tool, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+func TestPreflightMCPTimeout(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	err := PreflightMCP(ctx, blockingToolset{})
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("expected context error, got nil")
+	}
+	if elapsed > 2*time.Second {
+		t.Errorf("preflight took too long (%s); timeout should have fired at ~150ms", elapsed)
+	}
+	if elapsed < 150*time.Millisecond/2 {
+		t.Errorf("preflight returned too early (%s)", elapsed)
 	}
 }
 

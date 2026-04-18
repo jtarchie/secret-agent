@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jtarchie/secret-agent/internal/bot"
 	"github.com/jtarchie/secret-agent/internal/chat"
@@ -289,6 +290,50 @@ mcp:
 	}
 	if rt == nil {
 		t.Fatal("got nil runtime")
+	}
+}
+
+func TestPreflightMCPNoServers(t *testing.T) {
+	ctx := context.Background()
+	b := writeBot(t, `
+name: b
+system: s
+`)
+	rt, err := New(ctx, b, stubLLM{})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := rt.PreflightMCP(ctx, 1*time.Second); err != nil {
+		t.Fatalf("PreflightMCP with no servers should be a no-op, got: %v", err)
+	}
+}
+
+func TestPreflightMCPTimesOutOnDeadServer(t *testing.T) {
+	ctx := context.Background()
+	b := writeBot(t, `
+name: b
+system: s
+mcp:
+  - name: dead
+    url: http://127.0.0.1:1
+`)
+	rt, err := New(ctx, b, stubLLM{})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	start := time.Now()
+	err = rt.PreflightMCP(ctx, 250*time.Millisecond)
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("expected preflight error against dead server")
+	}
+	if !strings.Contains(err.Error(), "dead") {
+		t.Errorf("error should name the failing server; got: %v", err)
+	}
+	if elapsed > 5*time.Second {
+		t.Errorf("preflight took too long (%s); timeout should have fired", elapsed)
 	}
 }
 

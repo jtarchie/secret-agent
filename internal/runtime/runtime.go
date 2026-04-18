@@ -3,9 +3,11 @@ package runtime
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
@@ -31,10 +33,21 @@ type Runtime struct {
 
 	stateless bool
 	turnSeq   atomic.Uint64
+
+	mcpProbes []mcpProbe
+}
+
+// mcpProbe identifies one MCP toolset constructed during buildAgent so
+// PreflightMCP can exercise it.
+type mcpProbe struct {
+	agent   string // agent name this MCP server belongs to
+	server  string // mcp server name as declared in YAML
+	toolset adktool.Toolset
 }
 
 func New(ctx context.Context, b *bot.Bot, llm adkmodel.LLM) (*Runtime, error) {
-	root, err := buildAgent(b.Name, fmt.Sprintf("YAML-defined bot %q", b.Name), b, llm)
+	bld := &builder{}
+	root, err := bld.buildAgent(b.Name, fmt.Sprintf("YAML-defined bot %q", b.Name), b, llm)
 	if err != nil {
 		return nil, err
 	}
@@ -56,14 +69,21 @@ func New(ctx context.Context, b *bot.Bot, llm adkmodel.LLM) (*Runtime, error) {
 		runner:    r,
 		known:     map[string]struct{}{},
 		stateless: b.Permissions.MemoryOrDefault() == bot.MemoryNone,
+		mcpProbes: bld.probes,
 	}, nil
+}
+
+// builder threads a shared probe slice through the recursive buildAgent so
+// MCP servers declared anywhere in the bot tree can be preflighted together.
+type builder struct {
+	probes []mcpProbe
 }
 
 // buildAgent constructs an ADK llmagent for a bot, recursively wrapping each
 // declared sub-agent as an AgentTool so the parent LLM can invoke it by name.
 // The provided name/description override the bot's own so parent-defined map
 // keys and descriptions drive what the parent LLM sees.
-func buildAgent(name, description string, b *bot.Bot, llm adkmodel.LLM) (agent.Agent, error) {
+func (bld *builder) buildAgent(name, description string, b *bot.Bot, llm adkmodel.LLM) (agent.Agent, error) {
 	toolsets := make([]adktool.Toolset, 0, len(b.MCP))
 	for _, m := range b.MCP {
 		ts, err := tool.NewMCP(m)
@@ -71,6 +91,7 @@ func buildAgent(name, description string, b *bot.Bot, llm adkmodel.LLM) (agent.A
 			return nil, fmt.Errorf("mcp %q: %w", m.Name, err)
 		}
 		toolsets = append(toolsets, ts)
+		bld.probes = append(bld.probes, mcpProbe{agent: name, server: m.Name, toolset: ts})
 	}
 
 	tools := make([]adktool.Tool, 0, len(b.Tools)+len(b.Agents))
@@ -100,7 +121,7 @@ func buildAgent(name, description string, b *bot.Bot, llm adkmodel.LLM) (agent.A
 		if childDesc == "" {
 			childDesc = fmt.Sprintf("Sub-agent %q", key)
 		}
-		child, err := buildAgent(key, childDesc, ref.Bot, llm)
+		child, err := bld.buildAgent(key, childDesc, ref.Bot, llm)
 		if err != nil {
 			return nil, fmt.Errorf("agent %q: %w", key, err)
 		}
@@ -145,6 +166,56 @@ func buildAgent(name, description string, b *bot.Bot, llm adkmodel.LLM) (agent.A
 		return nil, fmt.Errorf("create agent %q: %w", name, err)
 	}
 	return built, nil
+}
+
+// PreflightMCP exercises every MCP toolset collected during buildAgent in
+// parallel, each bounded by timeout, and returns the first error it sees.
+// A zero timeout disables the per-probe deadline. Returns nil if no MCP
+// servers are declared.
+//
+// The successful session a probe opens is cached by mcptoolset, so the
+// agent's first chat turn reuses it instead of dialing again.
+func (r *Runtime) PreflightMCP(ctx context.Context, timeout time.Duration) error {
+	if len(r.mcpProbes) == 0 {
+		return nil
+	}
+
+	type result struct {
+		probe mcpProbe
+		err   error
+	}
+	results := make(chan result, len(r.mcpProbes))
+
+	var wg sync.WaitGroup
+	for _, p := range r.mcpProbes {
+		wg.Add(1)
+		go func(p mcpProbe) {
+			defer wg.Done()
+			probeCtx := ctx
+			if timeout > 0 {
+				var cancel context.CancelFunc
+				probeCtx, cancel = context.WithTimeout(ctx, timeout)
+				defer cancel()
+			}
+			err := tool.PreflightMCP(probeCtx, p.toolset)
+			if err != nil {
+				if errors.Is(err, context.DeadlineExceeded) {
+					err = fmt.Errorf("preflight timed out after %s: %w", timeout, err)
+				}
+				err = fmt.Errorf("mcp %q on agent %q: %w", p.server, p.agent, err)
+			}
+			results <- result{probe: p, err: err}
+		}(p)
+	}
+	wg.Wait()
+	close(results)
+
+	for res := range results {
+		if res.err != nil {
+			return res.err
+		}
+	}
+	return nil
 }
 
 // HandlerFor returns a chat.Handler bound to the given conversation ID.

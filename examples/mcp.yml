@@ -1,0 +1,8 @@
+name: mcp
+system: |
+  You are a helpful assistant that provides information about the Knowhere server.
+
+mcp:
+- name: knowhere
+  description: Knowhere provides information to query metadata about points of interest in the united states.
+  url: https://api.knowhere.live/api/mcp  

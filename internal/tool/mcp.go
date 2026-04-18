@@ -1,14 +1,19 @@
 package tool
 
 import (
+	"context"
 	"fmt"
+	"iter"
 	"net/http"
 	"os"
 	"os/exec"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"google.golang.org/adk/agent"
+	"google.golang.org/adk/session"
 	adktool "google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/mcptoolset"
+	"google.golang.org/genai"
 
 	"github.com/jtarchie/secret-agent/internal/bot"
 )
@@ -79,6 +84,40 @@ func newHeaderHTTPClient(headers map[string]string) *http.Client {
 type headerRoundTripper struct {
 	headers map[string]string
 	base    http.RoundTripper
+}
+
+// PreflightMCP probes an MCP toolset by listing its tools, returning any
+// connect or handshake error. It reuses the toolset's cached session so a
+// successful probe warms up the first real chat turn.
+func PreflightMCP(ctx context.Context, ts adktool.Toolset) error {
+	_, err := ts.Tools(preflightCtx{Context: ctx})
+	return err
+}
+
+// preflightCtx is the minimal agent.ReadonlyContext needed to satisfy
+// Toolset.Tools during startup probes. Only the embedded context.Context is
+// meaningful — the remaining fields return zero values because mcptoolset
+// only uses the context for cancellation/timeout propagation.
+type preflightCtx struct {
+	context.Context
+}
+
+var _ agent.ReadonlyContext = preflightCtx{}
+
+func (preflightCtx) UserContent() *genai.Content       { return nil }
+func (preflightCtx) InvocationID() string              { return "" }
+func (preflightCtx) AgentName() string                 { return "" }
+func (preflightCtx) ReadonlyState() session.ReadonlyState { return emptyState{} }
+func (preflightCtx) UserID() string                    { return "" }
+func (preflightCtx) AppName() string                   { return "" }
+func (preflightCtx) SessionID() string                 { return "" }
+func (preflightCtx) Branch() string                    { return "" }
+
+type emptyState struct{}
+
+func (emptyState) Get(string) (any, error) { return nil, session.ErrStateKeyNotExist }
+func (emptyState) All() iter.Seq2[string, any] {
+	return func(func(string, any) bool) {}
 }
 
 func (h *headerRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {

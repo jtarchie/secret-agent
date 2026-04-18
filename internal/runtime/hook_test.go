@@ -63,7 +63,7 @@ hooks:
   - on: after_agent
     expr: "nil"
 `)
-	if _, err := buildAgent(b.Name, "test", b, stubLLM{}); err != nil {
+	if _, err := (&builder{}).buildAgent(b.Name, "test", b, stubLLM{}); err != nil {
 		t.Fatalf("buildAgent: %v", err)
 	}
 }
@@ -76,7 +76,7 @@ tools:
   - name: greet
     sh: echo hi
 `)
-	if _, err := buildAgent(b.Name, "test", b, stubLLM{}); err != nil {
+	if _, err := (&builder{}).buildAgent(b.Name, "test", b, stubLLM{}); err != nil {
 		t.Fatalf("buildAgent: %v", err)
 	}
 }
@@ -98,7 +98,7 @@ hooks:
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
-	if _, err := buildAgent(b.Name, "test", b, stubLLM{}); err == nil {
+	if _, err := (&builder{}).buildAgent(b.Name, "test", b, stubLLM{}); err == nil {
 		t.Fatal("expected buildAgent to fail on bad hook expr")
 	}
 }

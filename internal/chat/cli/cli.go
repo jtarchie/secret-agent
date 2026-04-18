@@ -110,6 +110,7 @@ type model struct {
 	stream        <-chan chat.Chunk
 	cancel        context.CancelFunc
 	canceled      bool
+	hadError      bool
 	replyIdx      int
 	replyBuf      strings.Builder
 	spinner       spinner.Model
@@ -292,6 +293,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case chunkMsg:
 		if msg.Err != nil {
 			m.history[m.replyIdx] = m.errorStyle.Render("error") + ": " + msg.Err.Error()
+			m.hadError = true
 			m.refreshViewport()
 			return m, waitForChunk(m.stream)
 		}
@@ -306,7 +308,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, cmd
 
 	case streamDoneMsg:
-		if m.replyBuf.Len() == 0 && m.replyIdx >= 0 && m.replyIdx < len(m.history) {
+		if m.replyBuf.Len() == 0 && !m.hadError && m.replyIdx >= 0 && m.replyIdx < len(m.history) {
 			m.history = append(m.history[:m.replyIdx], m.history[m.replyIdx+1:]...)
 		}
 		if m.replyBuf.Len() > 0 {
@@ -329,6 +331,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.replyIdx = -1
 		m.replyBuf.Reset()
 		m.canceled = false
+		m.hadError = false
 		return m, nil
 	}
 
