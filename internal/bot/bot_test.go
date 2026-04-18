@@ -313,3 +313,38 @@ tools:
 		t.Fatal("expected error")
 	}
 }
+
+func TestLoadTriggersTrimAndDedupe(t *testing.T) {
+	p := writeBot(t, `
+name: b
+system: s
+triggers:
+  - "  @bot  "
+  - "@BOT"
+  - "@willow"
+`)
+	b, err := Load(p)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if len(b.Triggers) != 2 {
+		t.Fatalf("len(triggers) = %d, want 2 (trimmed + deduped case-insensitively); got %v", len(b.Triggers), b.Triggers)
+	}
+	if b.Triggers[0] != "@bot" || b.Triggers[1] != "@willow" {
+		t.Errorf("triggers = %v, want [@bot @willow]", b.Triggers)
+	}
+}
+
+func TestLoadTriggersRejectEmpty(t *testing.T) {
+	p := writeBot(t, `
+name: b
+system: s
+triggers:
+  - "@bot"
+  - ""
+`)
+	_, err := Load(p)
+	if err == nil {
+		t.Fatal("expected error for empty trigger")
+	}
+}

@@ -125,6 +125,7 @@ func runRun(args []string) error {
 			signaltransport.WithCommand(*signalCmdFlag),
 			signaltransport.WithLogger(newLogger(*verboseFlag)),
 			signaltransport.WithVerbose(*verboseFlag),
+			signaltransport.WithTriggers(b.Triggers),
 		)
 	default:
 		return fmt.Errorf("unknown --transport %q (want cli or signal)", *transportFlag)

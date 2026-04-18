@@ -1,7 +1,7 @@
 - interface with whatsapp
 - support secrets via environment variables
 - cron scheduling?
-- hooks
 - withing a container image / Dockerfile
 - MCPs of course
 - subagents can specify their own models?
+- CLI I cannot mouse select anything from the terminal

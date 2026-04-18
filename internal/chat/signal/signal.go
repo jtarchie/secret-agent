@@ -25,6 +25,10 @@ type Transport struct {
 	stateDir string
 	verbose  int
 	logger   *slog.Logger
+
+	triggers []string
+	matcher  *triggerMatcher
+	buffers  sync.Map // peerID → *peerBuffer
 }
 
 type Option func(*Transport)
@@ -38,6 +42,14 @@ func WithLogger(l *slog.Logger) Option { return func(t *Transport) { t.logger = 
 // WithVerbose passes `-v` (verbose=1) or `-vv` (verbose=2) to signal-cli,
 // raising its log level from WARN (the default) to INFO or DEBUG.
 func WithVerbose(n int) Option { return func(t *Transport) { t.verbose = n } }
+
+// WithTriggers configures the set of trigger words the bot waits for before
+// replying. An empty or nil slice keeps the pre-trigger behavior (reply to
+// every DM). Messages without any trigger are buffered per-peer and bundled
+// into the next triggered turn as prior context.
+func WithTriggers(words []string) Option {
+	return func(t *Transport) { t.triggers = append(t.triggers[:0], words...) }
+}
 
 // New creates a Signal transport. account is the linked-device phone number
 // (E.164); stateDir is the signal-cli state directory.
@@ -66,7 +78,16 @@ func (t *Transport) Run(ctx context.Context, botName string, newHandler chat.Han
 		return fmt.Errorf("signal transport: stateDir is required")
 	}
 
+	matcher, err := newTriggerMatcher(t.triggers)
+	if err != nil {
+		return fmt.Errorf("signal transport: compile triggers: %w", err)
+	}
+	t.matcher = matcher
+
 	log := t.logger.With("component", "signal", "account", t.account)
+	if t.matcher != nil {
+		log.Info("trigger-word gating enabled", "triggers", t.triggers, "buffer_cap", peerBufferCap)
+	}
 
 	extra := verboseArgs(t.verbose)
 	log.Info("spawning signal-cli",
@@ -176,6 +197,25 @@ func (t *Transport) dispatchReceive(
 		return
 	}
 
+	buf := t.bufferFor(peerID)
+	if t.matcher != nil && !t.matcher.Matches(text) {
+		buf.Append(text)
+		log.Info("buffered untriggered message",
+			"peer", peerID,
+			"bytes", len(text),
+			"dropped_attachments", len(atts),
+		)
+		return
+	}
+
+	if prior := buf.Drain(); len(prior) > 0 {
+		log.Info("flushing buffered prior messages into turn",
+			"peer", peerID,
+			"prior_count", len(prior),
+		)
+		text = wrapWithPrior(prior, text)
+	}
+
 	log.Info("received DM",
 		"peer", peerID,
 		"source_name", env.SourceName,
@@ -184,6 +224,15 @@ func (t *Transport) dispatchReceive(
 	)
 	msg := chat.Message{Text: text, Attachments: atts}
 	go t.handleDM(ctx, log, cli, newHandler(peerID), lockFor(peerID), peerID, recipient, msg)
+}
+
+// bufferFor returns the per-peer message buffer, creating it on first use.
+func (t *Transport) bufferFor(peerID string) *peerBuffer {
+	if v, ok := t.buffers.Load(peerID); ok {
+		return v.(*peerBuffer)
+	}
+	v, _ := t.buffers.LoadOrStore(peerID, &peerBuffer{})
+	return v.(*peerBuffer)
 }
 
 // attachmentsFor resolves signal-cli's attachment metadata to local file paths

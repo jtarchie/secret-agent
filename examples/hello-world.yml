@@ -7,6 +7,13 @@ system:
   the `add` tool to sum two numbers, or the `shout` tool to return an uppercased
   exclamation of a name.
 
+# Optional: on the Signal transport, only reply when a message contains one of
+# these words (word-boundary, case-insensitive). Un-triggered messages are
+# buffered per-peer and bundled as prior context into the next triggered turn.
+# Ignored by the CLI transport. Omit to reply to every DM.
+triggers:
+  - "@bot"
+
 agents:
   greeter:
     file: ./greeter.yml

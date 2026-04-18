@@ -13,11 +13,12 @@ import (
 )
 
 type Bot struct {
-	Name   string              `yaml:"name"`
-	System string              `yaml:"system"`
-	Tools  []Tool              `yaml:"tools"`
-	Agents map[string]AgentRef `yaml:"agents"`
-	Hooks  []Hook              `yaml:"hooks"`
+	Name     string              `yaml:"name"`
+	System   string              `yaml:"system"`
+	Triggers []string            `yaml:"triggers,omitempty"`
+	Tools    []Tool              `yaml:"tools"`
+	Agents   map[string]AgentRef `yaml:"agents"`
+	Hooks    []Hook              `yaml:"hooks"`
 }
 
 // HookEvent names an ADK extension point a hook attaches to.
@@ -315,6 +316,24 @@ func loadBot(path string, visited map[string]bool, depth int) (*Bot, error) {
 	}
 	if b.System == "" {
 		return nil, fmt.Errorf("%s: system is required", path)
+	}
+
+	if len(b.Triggers) > 0 {
+		seen := make(map[string]struct{}, len(b.Triggers))
+		deduped := b.Triggers[:0]
+		for i, t := range b.Triggers {
+			t = strings.TrimSpace(t)
+			if t == "" {
+				return nil, fmt.Errorf("%s: triggers[%d]: must not be empty", path, i)
+			}
+			key := strings.ToLower(t)
+			if _, dup := seen[key]; dup {
+				continue
+			}
+			seen[key] = struct{}{}
+			deduped = append(deduped, t)
+		}
+		b.Triggers = deduped
 	}
 
 	for i := range b.Tools {
