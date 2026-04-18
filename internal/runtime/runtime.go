@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
@@ -27,6 +28,9 @@ type Runtime struct {
 
 	mu    sync.Mutex
 	known map[string]struct{}
+
+	stateless bool
+	turnSeq   atomic.Uint64
 }
 
 func New(ctx context.Context, b *bot.Bot, llm adkmodel.LLM) (*Runtime, error) {
@@ -47,10 +51,11 @@ func New(ctx context.Context, b *bot.Bot, llm adkmodel.LLM) (*Runtime, error) {
 	}
 
 	return &Runtime{
-		appName:  b.Name,
-		sessions: sessions,
-		runner:   r,
-		known:    map[string]struct{}{},
+		appName:   b.Name,
+		sessions:  sessions,
+		runner:    r,
+		known:     map[string]struct{}{},
+		stateless: b.Permissions.MemoryOrDefault() == bot.MemoryNone,
 	}, nil
 }
 
@@ -134,6 +139,8 @@ func buildAgent(name, description string, b *bot.Bot, llm adkmodel.LLM) (agent.A
 
 // HandlerFor returns a chat.Handler bound to the given conversation ID.
 // The underlying ADK session is created lazily (in-memory) on first use.
+// In stateless mode each turn gets its own session ID so no history
+// accumulates across turns.
 func (r *Runtime) HandlerFor(convID string) chat.Handler {
 	return func(ctx context.Context, userMsg chat.Message) <-chan chat.Chunk {
 		out := make(chan chat.Chunk)
@@ -150,7 +157,12 @@ func (r *Runtime) HandlerFor(convID string) chat.Handler {
 				}
 			}
 
-			if err := r.ensureSession(ctx, convID); err != nil {
+			sessionID := convID
+			if r.stateless {
+				sessionID = fmt.Sprintf("%s#t%d", convID, r.turnSeq.Add(1))
+			}
+
+			if err := r.ensureSession(ctx, sessionID); err != nil {
 				emit(chat.Chunk{Err: err})
 				return
 			}
@@ -161,7 +173,7 @@ func (r *Runtime) HandlerFor(convID string) chat.Handler {
 				return
 			}
 			runCtx := tool.WithAttachments(ctx, userMsg.Attachments)
-			for ev, err := range r.runner.Run(runCtx, convID, convID, msg, agent.RunConfig{}) {
+			for ev, err := range r.runner.Run(runCtx, sessionID, sessionID, msg, agent.RunConfig{}) {
 				if err != nil {
 					emit(chat.Chunk{Err: err})
 					return

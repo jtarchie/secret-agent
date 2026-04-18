@@ -26,9 +26,11 @@ type Transport struct {
 	verbose  int
 	logger   *slog.Logger
 
-	triggers []string
-	matcher  *triggerMatcher
-	buffers  sync.Map // convKey → *peerBuffer
+	triggers         []string
+	matcher          *triggerMatcher
+	buffers          sync.Map // convKey → *peerBuffer
+	bufferingEnabled bool
+	attachmentsOK    bool
 
 	// outbound tracks message bodies we recently sent, keyed by body. Used
 	// to suppress sync.sentMessage echoes of our own Note-to-Self replies.
@@ -59,13 +61,29 @@ func WithTriggers(words []string) Option {
 	return func(t *Transport) { t.triggers = append(t.triggers[:0], words...) }
 }
 
+// WithBuffering toggles the per-conversation pending-message buffer. When
+// disabled, un-triggered messages are dropped immediately instead of
+// accumulating for later bundling. Default: enabled.
+func WithBuffering(on bool) Option {
+	return func(t *Transport) { t.bufferingEnabled = on }
+}
+
+// WithAttachmentsAllowed toggles whether user-sent attachments reach the
+// model. When false, attachments are stripped at the transport and the
+// bot never sees them. Default: allowed.
+func WithAttachmentsAllowed(on bool) Option {
+	return func(t *Transport) { t.attachmentsOK = on }
+}
+
 // New creates a Signal transport. account is the linked-device phone number
 // (E.164); stateDir is the signal-cli state directory.
 func New(account, stateDir string, opts ...Option) *Transport {
 	t := &Transport{
-		command:  "signal-cli",
-		account:  account,
-		stateDir: stateDir,
+		command:          "signal-cli",
+		account:          account,
+		stateDir:         stateDir,
+		bufferingEnabled: true,
+		attachmentsOK:    true,
 	}
 	for _, opt := range opts {
 		opt(t)
@@ -195,7 +213,15 @@ func (t *Transport) dispatchReceive(
 	}
 
 	text := strings.TrimSpace(dm.Message)
-	atts := t.attachmentsFor(dm.Attachments)
+	var atts []chat.Attachment
+	if t.attachmentsOK {
+		atts = t.attachmentsFor(dm.Attachments)
+	} else if len(dm.Attachments) > 0 {
+		log.Debug("dropping attachments: disallowed by bot permissions",
+			"source", env.peerID(),
+			"count", len(dm.Attachments),
+		)
+	}
 	if text == "" && len(atts) == 0 {
 		log.Debug("ignoring empty message", "source", env.peerID())
 		return
@@ -226,24 +252,32 @@ func (t *Transport) dispatchReceive(
 		// messages from different senders as prior context is confusing
 		// and the semantics get thorny fast.
 	} else {
-		buf := t.bufferFor(conv.key)
-		if t.matcher != nil && !t.matcher.Matches(text) {
-			buf.Append(text)
-			log.Info("buffered untriggered message",
+		if t.bufferingEnabled {
+			buf := t.bufferFor(conv.key)
+			if t.matcher != nil && !t.matcher.Matches(text) {
+				buf.Append(text)
+				log.Info("buffered untriggered message",
+					"conv", conv.key,
+					"kind", conv.kind,
+					"bytes", len(text),
+					"dropped_attachments", len(atts),
+				)
+				return
+			}
+			if prior := buf.Drain(); len(prior) > 0 {
+				log.Info("flushing buffered prior messages into turn",
+					"conv", conv.key,
+					"kind", conv.kind,
+					"prior_count", len(prior),
+				)
+				text = wrapWithPrior(prior, text)
+			}
+		} else if t.matcher != nil && !t.matcher.Matches(text) {
+			log.Debug("ignoring untriggered message: buffering disabled",
 				"conv", conv.key,
 				"kind", conv.kind,
-				"bytes", len(text),
-				"dropped_attachments", len(atts),
 			)
 			return
-		}
-		if prior := buf.Drain(); len(prior) > 0 {
-			log.Info("flushing buffered prior messages into turn",
-				"conv", conv.key,
-				"kind", conv.kind,
-				"prior_count", len(prior),
-			)
-			text = wrapWithPrior(prior, text)
 		}
 	}
 

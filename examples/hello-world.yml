@@ -14,6 +14,11 @@ system:
 triggers:
   - "@bot"
 
+# Optional permissions block. Unset fields take permissive defaults.
+# permissions:
+#   attachments: false   # strip user attachments at the transport layer
+#   memory: session      # full (default) | session (skip buffer) | none (stateless)
+
 agents:
   greeter:
     file: ./greeter.yml

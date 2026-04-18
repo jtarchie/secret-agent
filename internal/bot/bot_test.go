@@ -348,3 +348,53 @@ triggers:
 		t.Fatal("expected error for empty trigger")
 	}
 }
+
+func TestLoadPermissionsDefaults(t *testing.T) {
+	p := writeBot(t, `
+name: b
+system: s
+`)
+	b, err := Load(p)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if !b.Permissions.AttachmentsAllowed() {
+		t.Error("attachments default should be true")
+	}
+	if got := b.Permissions.MemoryOrDefault(); got != MemoryFull {
+		t.Errorf("memory default = %q, want %q", got, MemoryFull)
+	}
+}
+
+func TestLoadPermissionsExplicit(t *testing.T) {
+	p := writeBot(t, `
+name: b
+system: s
+permissions:
+  attachments: false
+  memory: none
+`)
+	b, err := Load(p)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if b.Permissions.AttachmentsAllowed() {
+		t.Error("attachments should be false when explicitly set")
+	}
+	if got := b.Permissions.MemoryOrDefault(); got != MemoryNone {
+		t.Errorf("memory = %q, want %q", got, MemoryNone)
+	}
+}
+
+func TestLoadPermissionsInvalidMemory(t *testing.T) {
+	p := writeBot(t, `
+name: b
+system: s
+permissions:
+  memory: wiggle
+`)
+	_, err := Load(p)
+	if err == nil {
+		t.Fatal("expected error for unknown memory mode")
+	}
+}

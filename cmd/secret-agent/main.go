@@ -111,10 +111,15 @@ func runRun(args []string) error {
 		return err
 	}
 
+	attachmentsOK := b.Permissions.AttachmentsAllowed()
+	bufferingOn := b.Permissions.MemoryOrDefault() == bot.MemoryFull
+
 	var transport chat.Transport
 	switch *transportFlag {
 	case "cli":
-		transport = cli.New()
+		transport = cli.New(
+			cli.WithAttachmentsAllowed(attachmentsOK),
+		)
 	case "signal":
 		if *signalAccountFlag == "" || *signalStateDirFlag == "" {
 			return fmt.Errorf("--transport=signal requires --signal-account and --signal-state-dir")
@@ -126,6 +131,8 @@ func runRun(args []string) error {
 			signaltransport.WithLogger(newLogger(*verboseFlag)),
 			signaltransport.WithVerbose(*verboseFlag),
 			signaltransport.WithTriggers(b.Triggers),
+			signaltransport.WithBuffering(bufferingOn),
+			signaltransport.WithAttachmentsAllowed(attachmentsOK),
 		)
 	default:
 		return fmt.Errorf("unknown --transport %q (want cli or signal)", *transportFlag)

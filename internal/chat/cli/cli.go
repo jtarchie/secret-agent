@@ -20,7 +20,8 @@ import (
 )
 
 type Transport struct {
-	markdown bool
+	markdown      bool
+	attachmentsOK bool
 }
 
 type Option func(*Transport)
@@ -29,8 +30,15 @@ func WithMarkdown(on bool) Option {
 	return func(t *Transport) { t.markdown = on }
 }
 
+// WithAttachmentsAllowed toggles whether #file:... tokens attach files to
+// the turn. When false, the tokens are still cleaned from the visible text
+// but no Attachments are sent to the handler. Default: allowed.
+func WithAttachmentsAllowed(on bool) Option {
+	return func(t *Transport) { t.attachmentsOK = on }
+}
+
 func New(opts ...Option) *Transport {
-	t := &Transport{markdown: true}
+	t := &Transport{markdown: true, attachmentsOK: true}
 	for _, opt := range opts {
 		opt(t)
 	}
@@ -39,7 +47,7 @@ func New(opts ...Option) *Transport {
 
 func (t *Transport) Run(ctx context.Context, botName string, newHandler chat.HandlerFactory) error {
 	_, err := tea.NewProgram(
-		newModel(ctx, botName, newHandler("local"), t.markdown),
+		newModel(ctx, botName, newHandler("local"), t.markdown, t.attachmentsOK),
 		tea.WithAltScreen(),
 		tea.WithMouseCellMotion(),
 	).Run()
@@ -88,18 +96,19 @@ type model struct {
 	width    int
 	height   int
 
-	stream       <-chan chat.Chunk
-	cancel       context.CancelFunc
-	canceled     bool
-	replyIdx     int
-	replyBuf     strings.Builder
-	spinner      spinner.Model
-	inputHist    []string
-	inputHistIdx int
-	help         help.Model
-	lastReply    string
-	markdown     bool
-	renderer     *glamour.TermRenderer
+	stream        <-chan chat.Chunk
+	cancel        context.CancelFunc
+	canceled      bool
+	replyIdx      int
+	replyBuf      strings.Builder
+	spinner       spinner.Model
+	inputHist     []string
+	inputHistIdx  int
+	help          help.Model
+	lastReply     string
+	markdown      bool
+	attachmentsOK bool
+	renderer      *glamour.TermRenderer
 
 	userStyle   lipgloss.Style
 	botStyle    lipgloss.Style
@@ -107,7 +116,7 @@ type model struct {
 	statusStyle lipgloss.Style
 }
 
-func newModel(ctx context.Context, botName string, h chat.Handler, markdown bool) *model {
+func newModel(ctx context.Context, botName string, h chat.Handler, markdown, attachmentsOK bool) *model {
 	ta := textarea.New()
 	ta.Placeholder = "Type a message (enter to send, alt+enter for newline)..."
 	ta.Focus()
@@ -125,19 +134,20 @@ func newModel(ctx context.Context, botName string, h chat.Handler, markdown bool
 	hp := help.New()
 
 	return &model{
-		ctx:         ctx,
-		botName:     botName,
-		handler:     h,
-		viewport:    vp,
-		input:       ta,
-		replyIdx:    -1,
-		spinner:     sp,
-		help:        hp,
-		markdown:    markdown,
-		userStyle:   lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("6")),
-		botStyle:    lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("5")),
-		errorStyle:  lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("9")),
-		statusStyle: statusStyle,
+		ctx:           ctx,
+		botName:       botName,
+		handler:       h,
+		viewport:      vp,
+		input:         ta,
+		replyIdx:      -1,
+		spinner:       sp,
+		help:          hp,
+		markdown:      markdown,
+		attachmentsOK: attachmentsOK,
+		userStyle:     lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("6")),
+		botStyle:      lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("5")),
+		errorStyle:    lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("9")),
+		statusStyle:   statusStyle,
 	}
 }
 
@@ -217,6 +227,10 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if err != nil {
 				m.appendLine(m.errorStyle.Render("error") + ": " + err.Error())
 				return m, nil
+			}
+			if !m.attachmentsOK && len(atts) > 0 {
+				m.appendLine(m.statusStyle.Render("(attachments disabled by bot — ignored)"))
+				atts = nil
 			}
 			m.appendLine(m.userStyle.Render("you") + ": " + text)
 			if len(atts) > 0 {

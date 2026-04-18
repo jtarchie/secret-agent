@@ -116,3 +116,27 @@ func TestWrapWithPrior(t *testing.T) {
 }
 
 func stringOf(b byte) string { return string([]byte{b}) }
+
+func TestTransportDefaults(t *testing.T) {
+	tr := New("+15550000000", "/tmp")
+	if !tr.bufferingEnabled {
+		t.Error("bufferingEnabled default should be true")
+	}
+	if !tr.attachmentsOK {
+		t.Error("attachmentsOK default should be true")
+	}
+}
+
+func TestTransportOptionsFlipFlags(t *testing.T) {
+	tr := New(
+		"+15550000000", "/tmp",
+		WithBuffering(false),
+		WithAttachmentsAllowed(false),
+	)
+	if tr.bufferingEnabled {
+		t.Error("WithBuffering(false) should disable buffering")
+	}
+	if tr.attachmentsOK {
+		t.Error("WithAttachmentsAllowed(false) should disable attachments")
+	}
+}

@@ -13,12 +13,55 @@ import (
 )
 
 type Bot struct {
-	Name     string              `yaml:"name"`
-	System   string              `yaml:"system"`
-	Triggers []string            `yaml:"triggers,omitempty"`
-	Tools    []Tool              `yaml:"tools"`
-	Agents   map[string]AgentRef `yaml:"agents"`
-	Hooks    []Hook              `yaml:"hooks"`
+	Name        string              `yaml:"name"`
+	System      string              `yaml:"system"`
+	Triggers    []string            `yaml:"triggers,omitempty"`
+	Permissions Permissions         `yaml:"permissions,omitempty"`
+	Tools       []Tool              `yaml:"tools"`
+	Agents      map[string]AgentRef `yaml:"agents"`
+	Hooks       []Hook              `yaml:"hooks"`
+}
+
+// Permissions controls what a bot is allowed to see or retain. New fields
+// can be added here as capabilities are added; unset fields fall back to
+// permissive defaults so existing YAML keeps working.
+type Permissions struct {
+	// Attachments, when false, causes transports to strip user-sent
+	// attachments before they reach the model. Default true.
+	Attachments *bool `yaml:"attachments,omitempty"`
+
+	// Memory controls how much conversation state the bot retains.
+	//   full    (default) — ADK session kept per conversation, un-triggered
+	//                       messages buffered and bundled on next trigger.
+	//   session           — ADK session kept per conversation, buffering
+	//                       disabled (un-triggered messages drop on the floor).
+	//   none              — Stateless: a fresh session per turn, no buffering.
+	Memory MemoryMode `yaml:"memory,omitempty"`
+}
+
+type MemoryMode string
+
+const (
+	MemoryFull    MemoryMode = "full"
+	MemorySession MemoryMode = "session"
+	MemoryNone    MemoryMode = "none"
+)
+
+// AttachmentsAllowed reports whether a bot may receive user attachments.
+// Default is true when the field is unset.
+func (p Permissions) AttachmentsAllowed() bool {
+	if p.Attachments == nil {
+		return true
+	}
+	return *p.Attachments
+}
+
+// MemoryOrDefault returns Memory with the default (MemoryFull) applied.
+func (p Permissions) MemoryOrDefault() MemoryMode {
+	if p.Memory == "" {
+		return MemoryFull
+	}
+	return p.Memory
 }
 
 // HookEvent names an ADK extension point a hook attaches to.
@@ -316,6 +359,12 @@ func loadBot(path string, visited map[string]bool, depth int) (*Bot, error) {
 	}
 	if b.System == "" {
 		return nil, fmt.Errorf("%s: system is required", path)
+	}
+
+	switch b.Permissions.Memory {
+	case "", MemoryFull, MemorySession, MemoryNone:
+	default:
+		return nil, fmt.Errorf("%s: permissions.memory: %q is not a valid mode (want full|session|none)", path, b.Permissions.Memory)
 	}
 
 	if len(b.Triggers) > 0 {

@@ -1,11 +1,13 @@
 package runtime
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/jtarchie/secret-agent/internal/bot"
 	"github.com/jtarchie/secret-agent/internal/chat"
 )
 
@@ -181,3 +183,92 @@ func TestBuildUserContentMissingFile(t *testing.T) {
 		t.Fatal("expected error for missing attachment")
 	}
 }
+
+func TestNewStatelessFlag(t *testing.T) {
+	ctx := context.Background()
+
+	b := writeBot(t, `
+name: b
+system: s
+`)
+	rt, err := New(ctx, b, stubLLM{})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if rt.stateless {
+		t.Error("default bot should not be stateless")
+	}
+
+	bStateless := writeBot(t, `
+name: b
+system: s
+permissions:
+  memory: none
+`)
+	rtStateless, err := New(ctx, bStateless, stubLLM{})
+	if err != nil {
+		t.Fatalf("New stateless: %v", err)
+	}
+	if !rtStateless.stateless {
+		t.Error("memory: none should set stateless = true")
+	}
+}
+
+func TestStatelessHandlerCreatesFreshSessions(t *testing.T) {
+	ctx := context.Background()
+	b := writeBot(t, `
+name: b
+system: s
+permissions:
+  memory: none
+`)
+	rt, err := New(ctx, b, stubLLM{})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	h := rt.HandlerFor("conv-x")
+	for i := 0; i < 3; i++ {
+		ch := h(ctx, chat.Message{Text: "ping"})
+		for range ch { // stubLLM emits nothing; drain to completion
+		}
+	}
+
+	rt.mu.Lock()
+	got := len(rt.known)
+	rt.mu.Unlock()
+	if got != 3 {
+		t.Errorf("stateless should create a session per turn; len(known) = %d, want 3", got)
+	}
+	if seq := rt.turnSeq.Load(); seq != 3 {
+		t.Errorf("turnSeq = %d, want 3", seq)
+	}
+}
+
+func TestFullMemoryReusesSession(t *testing.T) {
+	ctx := context.Background()
+	b := writeBot(t, `
+name: b
+system: s
+`)
+	rt, err := New(ctx, b, stubLLM{})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	h := rt.HandlerFor("conv-y")
+	for i := 0; i < 3; i++ {
+		ch := h(ctx, chat.Message{Text: "ping"})
+		for range ch {
+		}
+	}
+
+	rt.mu.Lock()
+	got := len(rt.known)
+	rt.mu.Unlock()
+	if got != 1 {
+		t.Errorf("default mode should reuse one session; len(known) = %d, want 1", got)
+	}
+}
+
+var _ = bot.MemoryFull // keep bot import used if helpers change
