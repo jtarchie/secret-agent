@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/jtarchie/secret-agent/internal/bot"
 	"github.com/jtarchie/secret-agent/internal/chat"
@@ -27,7 +28,7 @@ func newLogger(verbose int) *slog.Logger {
 }
 
 const usage = `usage:
-  secret-agent run --model <provider/model-name> --api-key <key> [--transport cli|signal] [signal flags] <bot.yml>
+  secret-agent run --model <provider/model-name> --api-key <key> [--transport cli|signal] [--skip-preflight] [signal flags] <bot.yml>
   secret-agent signal-link --signal-state-dir <path> [--signal-device-name <name>]
 
 examples:
@@ -70,6 +71,7 @@ func runRun(args []string) error {
 	signalAccountFlag := fs.String("signal-account", "", "Signal phone number (E.164) for --transport=signal")
 	signalStateDirFlag := fs.String("signal-state-dir", "", "directory for signal-cli state (keys, ratchet state); required for --transport=signal")
 	signalCmdFlag := fs.String("signal-cli", "signal-cli", "path to the signal-cli binary")
+	skipPreflightFlag := fs.Bool("skip-preflight", false, "skip the startup check that verifies the model endpoint is reachable and the API key is valid")
 	verboseFlag := fs.Int("verbose", 0, "verbosity: 0 info, 1 debug + signal-cli -v, 2 debug + signal-cli -vv, 3 debug + signal-cli -vvv")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -94,6 +96,15 @@ func runRun(args []string) error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	if !*skipPreflightFlag {
+		preflightCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		err := model.Preflight(preflightCtx, provider, *keyFlag, *baseURLFlag)
+		cancel()
+		if err != nil {
+			return fmt.Errorf("model preflight failed (use --skip-preflight to bypass): %w", err)
+		}
+	}
 
 	rt, err := runtime.New(ctx, b, llm)
 	if err != nil {

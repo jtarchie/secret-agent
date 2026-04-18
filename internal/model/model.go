@@ -2,7 +2,10 @@
 package model
 
 import (
+	"context"
 	"fmt"
+	"io"
+	"net/http"
 	"strings"
 
 	genaianthropic "github.com/achetronic/adk-utils-go/genai/anthropic"
@@ -52,4 +55,66 @@ func Resolve(provider, name, apiKey, baseURL string) (adkmodel.LLM, error) {
 			ModelName: name,
 		}), nil
 	}
+}
+
+// AnthropicDefaultBaseURL is the default Anthropic API base URL.
+const AnthropicDefaultBaseURL = "https://api.anthropic.com/v1"
+
+// anthropicAPIVersion is the pinned Anthropic API version header value used
+// for the preflight /models request. It does not need to match the client SDK.
+const anthropicAPIVersion = "2023-06-01"
+
+// Preflight verifies the provider is reachable and the API key is valid by
+// issuing a GET to the provider's /models list endpoint. This call does not
+// consume inference tokens on any supported provider.
+func Preflight(ctx context.Context, provider, apiKey, baseURL string) error {
+	base, err := resolveBaseURL(provider, baseURL)
+	if err != nil {
+		return err
+	}
+	url := strings.TrimSuffix(base, "/") + "/models"
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return fmt.Errorf("build preflight request: %w", err)
+	}
+	if provider == "anthropic" {
+		req.Header.Set("x-api-key", apiKey)
+		req.Header.Set("anthropic-version", anthropicAPIVersion)
+	} else if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("GET %s: %w", url, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		return nil
+	}
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+	snippet := strings.TrimSpace(string(body))
+	if snippet == "" {
+		return fmt.Errorf("GET %s: %s", url, resp.Status)
+	}
+	return fmt.Errorf("GET %s: %s: %s", url, resp.Status, snippet)
+}
+
+// resolveBaseURL returns the API base URL for a provider, mirroring the logic
+// used by Resolve so Preflight hits the same endpoint the LLM client will.
+func resolveBaseURL(provider, override string) (string, error) {
+	if override != "" {
+		return override, nil
+	}
+	if provider == "anthropic" {
+		return AnthropicDefaultBaseURL, nil
+	}
+	def, ok := DefaultBaseURLs[provider]
+	if !ok {
+		return "", fmt.Errorf("unknown provider %q: pass --base-url, or use anthropic/openai/openrouter/ollama", provider)
+	}
+	return def, nil
 }
