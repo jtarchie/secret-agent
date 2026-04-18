@@ -20,6 +20,30 @@ type Bot struct {
 	Tools       []Tool              `yaml:"tools"`
 	Agents      map[string]AgentRef `yaml:"agents"`
 	Hooks       []Hook              `yaml:"hooks"`
+	MCP         []MCPServer         `yaml:"mcp,omitempty"`
+}
+
+// MCPServer declares an external Model Context Protocol server whose tools
+// are exposed to the bot's LLM. Exactly one of Command or URL must be set:
+//
+//	Command → local subprocess via *mcp.CommandTransport (stdio).
+//	URL     → remote server via *mcp.StreamableClientTransport.
+type MCPServer struct {
+	Name    string `yaml:"name"`
+	Command string `yaml:"command,omitempty"`
+	// Args are passed to Command. Ignored when URL is set.
+	Args []string `yaml:"args,omitempty"`
+	// Env is merged into Command's environment. Ignored when URL is set.
+	Env map[string]string `yaml:"env,omitempty"`
+	// URL is the streamable-HTTP MCP endpoint.
+	URL string `yaml:"url,omitempty"`
+	// Headers are applied to every HTTP request. Ignored when Command is set.
+	Headers map[string]string `yaml:"headers,omitempty"`
+	// ToolFilter is an optional allowlist of tool names the agent may see.
+	ToolFilter []string `yaml:"tool_filter,omitempty"`
+	// RequireConfirmation wires the ADK human-in-the-loop gate for every
+	// tool from this server.
+	RequireConfirmation bool `yaml:"require_confirmation,omitempty"`
 }
 
 // Permissions controls what a bot is allowed to see or retain. New fields
@@ -302,6 +326,41 @@ func normalizeBotHook(h *Hook, toolNames map[string]struct{}) error {
 	return validateHookBody(h)
 }
 
+// normalizeMCPServer trims string fields, validates the name shape, and
+// enforces transport exclusivity: exactly one of Command or URL must be
+// set. It does not dial the server — failures surface at first use.
+func normalizeMCPServer(m *MCPServer) error {
+	m.Name = strings.TrimSpace(m.Name)
+	m.Command = strings.TrimSpace(m.Command)
+	m.URL = strings.TrimSpace(m.URL)
+
+	if m.Name == "" {
+		return fmt.Errorf("name is required")
+	}
+	if !paramNameRe.MatchString(m.Name) {
+		return fmt.Errorf("name %q must match [A-Za-z_][A-Za-z0-9_]*", m.Name)
+	}
+
+	hasCmd := m.Command != ""
+	hasURL := m.URL != ""
+	switch {
+	case hasCmd && hasURL:
+		return fmt.Errorf("mcp %q: only one of command or url may be set", m.Name)
+	case !hasCmd && !hasURL:
+		return fmt.Errorf("mcp %q: exactly one of command or url is required", m.Name)
+	}
+
+	for i, n := range m.ToolFilter {
+		n = strings.TrimSpace(n)
+		if n == "" {
+			return fmt.Errorf("mcp %q: tool_filter[%d] must not be empty", m.Name, i)
+		}
+		m.ToolFilter[i] = n
+	}
+
+	return nil
+}
+
 func validateHookBody(h *Hook) error {
 	set := []string{}
 	if h.Sh != "" {
@@ -430,6 +489,17 @@ func loadBot(path string, visited map[string]bool, depth int) (*Bot, error) {
 		toolNames[t.Name] = struct{}{}
 	}
 
+	for i := range b.MCP {
+		m := &b.MCP[i]
+		if err := normalizeMCPServer(m); err != nil {
+			return nil, fmt.Errorf("%s: mcp[%d]: %w", path, i, err)
+		}
+		if _, clash := toolNames[m.Name]; clash {
+			return nil, fmt.Errorf("%s: mcp %q conflicts with a tool of the same name", path, m.Name)
+		}
+		toolNames[m.Name] = struct{}{}
+	}
+
 	for i := range b.Hooks {
 		h := &b.Hooks[i]
 		if err := normalizeBotHook(h, toolNames); err != nil {
@@ -443,7 +513,7 @@ func loadBot(path string, visited map[string]bool, depth int) (*Bot, error) {
 			return nil, fmt.Errorf("%s: agent %q: name must match [A-Za-z_][A-Za-z0-9_]*", path, key)
 		}
 		if _, clash := toolNames[key]; clash {
-			return nil, fmt.Errorf("%s: agent %q conflicts with a tool of the same name", path, key)
+			return nil, fmt.Errorf("%s: agent %q conflicts with a tool or mcp server of the same name", path, key)
 		}
 		ref.File = strings.TrimSpace(ref.File)
 		ref.Description = strings.TrimSpace(ref.Description)

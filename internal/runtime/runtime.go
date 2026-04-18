@@ -64,6 +64,15 @@ func New(ctx context.Context, b *bot.Bot, llm adkmodel.LLM) (*Runtime, error) {
 // The provided name/description override the bot's own so parent-defined map
 // keys and descriptions drive what the parent LLM sees.
 func buildAgent(name, description string, b *bot.Bot, llm adkmodel.LLM) (agent.Agent, error) {
+	toolsets := make([]adktool.Toolset, 0, len(b.MCP))
+	for _, m := range b.MCP {
+		ts, err := tool.NewMCP(m)
+		if err != nil {
+			return nil, fmt.Errorf("mcp %q: %w", m.Name, err)
+		}
+		toolsets = append(toolsets, ts)
+	}
+
 	tools := make([]adktool.Tool, 0, len(b.Tools)+len(b.Agents))
 	for _, t := range b.Tools {
 		var (
@@ -124,6 +133,7 @@ func buildAgent(name, description string, b *bot.Bot, llm adkmodel.LLM) (agent.A
 		Model:                llm,
 		Instruction:          b.System,
 		Tools:                tools,
+		Toolsets:             toolsets,
 		BeforeModelCallbacks: cbs.BeforeModel,
 		AfterModelCallbacks:  cbs.AfterModel,
 		BeforeToolCallbacks:  cbs.BeforeTool,

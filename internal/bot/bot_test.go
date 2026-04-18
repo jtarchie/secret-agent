@@ -386,6 +386,138 @@ permissions:
 	}
 }
 
+func TestLoadMCPStdio(t *testing.T) {
+	p := writeBot(t, `
+name: b
+system: s
+mcp:
+  - name: fs
+    command: npx
+    args: ["-y", "@modelcontextprotocol/server-filesystem", "/data"]
+    env:
+      FOO: bar
+    tool_filter: [read_file, list_directory]
+    require_confirmation: true
+`)
+	b, err := Load(p)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if len(b.MCP) != 1 {
+		t.Fatalf("len(mcp) = %d, want 1", len(b.MCP))
+	}
+	m := b.MCP[0]
+	if m.Name != "fs" {
+		t.Errorf("name = %q", m.Name)
+	}
+	if m.Command != "npx" {
+		t.Errorf("command = %q", m.Command)
+	}
+	if len(m.Args) != 3 || m.Args[2] != "/data" {
+		t.Errorf("args = %v", m.Args)
+	}
+	if m.Env["FOO"] != "bar" {
+		t.Errorf("env[FOO] = %q", m.Env["FOO"])
+	}
+	if !m.RequireConfirmation {
+		t.Error("require_confirmation should be true")
+	}
+	if len(m.ToolFilter) != 2 {
+		t.Errorf("tool_filter = %v", m.ToolFilter)
+	}
+}
+
+func TestLoadMCPHTTP(t *testing.T) {
+	p := writeBot(t, `
+name: b
+system: s
+mcp:
+  - name: maps
+    url: https://example.com/mcp
+    headers:
+      Authorization: Bearer token
+`)
+	b, err := Load(p)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	m := b.MCP[0]
+	if m.URL != "https://example.com/mcp" {
+		t.Errorf("url = %q", m.URL)
+	}
+	if m.Headers["Authorization"] != "Bearer token" {
+		t.Errorf("headers = %v", m.Headers)
+	}
+}
+
+func TestLoadMCPRejectsBothTransports(t *testing.T) {
+	p := writeBot(t, `
+name: b
+system: s
+mcp:
+  - name: both
+    command: foo
+    url: https://example.com/mcp
+`)
+	_, err := Load(p)
+	if err == nil {
+		t.Fatal("expected error when both command and url set")
+	}
+	if !strings.Contains(err.Error(), "only one") {
+		t.Errorf("error should say only one: %v", err)
+	}
+}
+
+func TestLoadMCPRejectsNoTransport(t *testing.T) {
+	p := writeBot(t, `
+name: b
+system: s
+mcp:
+  - name: empty
+`)
+	_, err := Load(p)
+	if err == nil {
+		t.Fatal("expected error when neither command nor url set")
+	}
+	if !strings.Contains(err.Error(), "exactly one") {
+		t.Errorf("error should mention exactly one: %v", err)
+	}
+}
+
+func TestLoadMCPRejectsToolCollision(t *testing.T) {
+	p := writeBot(t, `
+name: b
+system: s
+tools:
+  - name: shared
+    sh: echo hi
+mcp:
+  - name: shared
+    command: foo
+`)
+	_, err := Load(p)
+	if err == nil {
+		t.Fatal("expected collision error")
+	}
+	if !strings.Contains(err.Error(), "conflicts") {
+		t.Errorf("error should mention conflict: %v", err)
+	}
+}
+
+func TestLoadMCPRejectsInvalidName(t *testing.T) {
+	p := writeBot(t, `
+name: b
+system: s
+mcp:
+  - name: "bad-name"
+    command: foo
+`)
+	_, err := Load(p)
+	if err == nil {
+		t.Fatal("expected name validation error")
+	}
+}
+
 func TestLoadPermissionsInvalidMemory(t *testing.T) {
 	p := writeBot(t, `
 name: b

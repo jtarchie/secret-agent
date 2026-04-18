@@ -272,3 +272,42 @@ system: s
 }
 
 var _ = bot.MemoryFull // keep bot import used if helpers change
+
+func TestNewWithMCPStdio(t *testing.T) {
+	ctx := context.Background()
+	b := writeBot(t, `
+name: b
+system: s
+mcp:
+  - name: fake
+    command: echo
+    args: ["hello"]
+`)
+	rt, err := New(ctx, b, stubLLM{})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if rt == nil {
+		t.Fatal("got nil runtime")
+	}
+}
+
+func TestNewWithMCPHTTP(t *testing.T) {
+	ctx := context.Background()
+	b := writeBot(t, `
+name: b
+system: s
+mcp:
+  - name: remote
+    url: https://example.com/mcp
+    headers:
+      Authorization: Bearer xyz
+`)
+	rt, err := New(ctx, b, stubLLM{})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if rt == nil {
+		t.Fatal("got nil runtime")
+	}
+}
