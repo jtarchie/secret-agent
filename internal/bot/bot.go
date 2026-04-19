@@ -21,6 +21,43 @@ type Bot struct {
 	Agents      map[string]AgentRef `yaml:"agents"`
 	Hooks       []Hook              `yaml:"hooks"`
 	MCP         []MCPServer         `yaml:"mcp,omitempty"`
+	Tests       []TestCase          `yaml:"tests,omitempty"`
+}
+
+// TestCase is one declarative eval. The runner sends Input as a single user
+// turn to a fresh in-memory session, records the tool-call trajectory, and
+// scores the turn against Expect.
+type TestCase struct {
+	Name   string     `yaml:"name"`
+	Input  string     `yaml:"input"`
+	Expect TestExpect `yaml:"expect"`
+}
+
+// TestExpect declares assertions against a single-turn run. All populated
+// fields must hold for the case to pass; empty fields are ignored.
+type TestExpect struct {
+	// ToolCalls must appear (in order) as a subsequence of the actual
+	// tool-call trajectory. Extra tool calls between matches are allowed.
+	ToolCalls []ExpectedToolCall `yaml:"tool_calls,omitempty"`
+	// FinalOutput asserts on the concatenated model text of the turn.
+	FinalOutput *OutputMatcher `yaml:"final_output,omitempty"`
+}
+
+// ExpectedToolCall matches a single observed tool call. Args, when set,
+// asserts a subset equality: every listed key must be present in the actual
+// args with a matching value; extra actual args are ignored.
+type ExpectedToolCall struct {
+	Name string         `yaml:"name"`
+	Args map[string]any `yaml:"args,omitempty"`
+}
+
+// OutputMatcher is a set of independent assertions on the final model text.
+// All non-zero fields must hold.
+type OutputMatcher struct {
+	Equals      string   `yaml:"equals,omitempty"`
+	Contains    []string `yaml:"contains,omitempty"`
+	NotContains []string `yaml:"not_contains,omitempty"`
+	Regex       string   `yaml:"regex,omitempty"`
 }
 
 // MCPServer declares an external Model Context Protocol server whose tools
@@ -504,6 +541,34 @@ func loadBot(path string, visited map[string]bool, depth int) (*Bot, error) {
 		h := &b.Hooks[i]
 		if err := normalizeBotHook(h, toolNames); err != nil {
 			return nil, fmt.Errorf("%s: hooks[%d]: %w", path, i, err)
+		}
+	}
+
+	seenTestNames := make(map[string]struct{}, len(b.Tests))
+	for i := range b.Tests {
+		tc := &b.Tests[i]
+		tc.Name = strings.TrimSpace(tc.Name)
+		if tc.Name == "" {
+			return nil, fmt.Errorf("%s: tests[%d].name is required", path, i)
+		}
+		if _, dup := seenTestNames[tc.Name]; dup {
+			return nil, fmt.Errorf("%s: tests[%d]: duplicate name %q", path, i, tc.Name)
+		}
+		seenTestNames[tc.Name] = struct{}{}
+		if tc.Input == "" {
+			return nil, fmt.Errorf("%s: test %q: input is required", path, tc.Name)
+		}
+		for j, etc := range tc.Expect.ToolCalls {
+			etc.Name = strings.TrimSpace(etc.Name)
+			if etc.Name == "" {
+				return nil, fmt.Errorf("%s: test %q: expect.tool_calls[%d].name is required", path, tc.Name, j)
+			}
+			tc.Expect.ToolCalls[j] = etc
+		}
+		if om := tc.Expect.FinalOutput; om != nil && om.Regex != "" {
+			if _, err := regexp.Compile(om.Regex); err != nil {
+				return nil, fmt.Errorf("%s: test %q: expect.final_output.regex: %w", path, tc.Name, err)
+			}
 		}
 	}
 

@@ -106,6 +106,7 @@ See [examples/](examples/) for runnable configs. Full field reference below.
 | `agents` | map[string]AgentRef | no | Sub-agents callable as tools (max nesting 8, no cycles). |
 | `hooks` | []Hook | no | Bot-level callbacks (before/after model, tool, agent). |
 | `mcp` | []MCPServer | no | External MCP servers to expose. |
+| `tests` | []TestCase | no | Declarative eval cases — see *Evaluation*. |
 
 ### Permissions
 
@@ -155,6 +156,17 @@ Param types: `string`, `integer`, `number`, `boolean`, `attachment`. Shorthand: 
 
 Exactly one of `command` / `url` is required.
 
+### Tests (evaluation cases)
+
+| Field | Type | Purpose |
+|---|---|---|
+| `name` | string | Unique case identifier. |
+| `input` | string | User message sent as a single turn. |
+| `expect.tool_calls` | []ExpectedToolCall | Must appear in this order as a subsequence of the observed trajectory. |
+| `expect.final_output` | OutputMatcher | `equals` / `contains` / `not_contains` / `regex` assertions on the concatenated model text. |
+
+`ExpectedToolCall.args` is a **subset** match — every listed key must be present with an equal value; extra actual args are ignored. Numbers compare across int/float representations (YAML `17` matches a runtime `17.0`). Run with `secret-agent eval` — see below.
+
 ## Command-line reference
 
 ### `secret-agent run <bot.yml>`
@@ -170,6 +182,31 @@ Exactly one of `command` / `url` is required.
 | `--signal-cli` | `signal-cli` | Path to the signal-cli binary. |
 | `--skip-preflight` | `false` | Skip model endpoint / API key validation at startup. |
 | `--verbose` | `0` | 0=info, 1/2/3=debug with signal-cli `-v` / `-vv` / `-vvv`. |
+
+### `secret-agent eval <bot.yml>`
+
+Runs every case in the bot's `tests:` block as a single fresh-session turn, scores each against its `expect`, and prints a PASS/FAIL summary. Exits non-zero if any case fails — suitable for CI. Each case hits the configured LLM, so an API key is required.
+
+| Flag | Default | Purpose |
+|---|---|---|
+| `--model` | — | **Required.** `provider/model-name`. |
+| `--api-key` | — | **Required.** Model provider API key. |
+| `--base-url` | — | Override provider base URL. |
+| `--skip-preflight` | `false` | Skip the startup model-endpoint check. |
+| `--verbose` | `false` | Also print observed tool trajectory and final text for passing cases. |
+
+Example `tests:` block (see [examples/hello-world.yml](examples/hello-world.yml)):
+
+```yaml
+tests:
+  - name: greets_by_name
+    input: "please greet Ada"
+    expect:
+      tool_calls:
+        - { name: greet, args: { who: "Ada" } }
+      final_output:
+        contains: ["Ada"]
+```
 
 ### `secret-agent signal-link`
 

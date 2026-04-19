@@ -23,6 +23,37 @@ import (
 	"github.com/jtarchie/secret-agent/internal/tool"
 )
 
+// ToolCall is a single observed tool invocation captured by a ToolRecorder.
+// Args is the arguments the LLM passed in; Result is what the tool returned
+// (or the replacement result from a hook); ErrMsg is non-empty if the tool
+// (or a before_tool hook) errored.
+type ToolCall struct {
+	Name   string
+	Args   map[string]any
+	Result map[string]any
+	ErrMsg string
+}
+
+// ToolRecorder is invoked once per tool call on the top-level agent after
+// the call completes. It fires on both success and failure. Sub-agent
+// internals are not surfaced — sub-agents are wrapped as tools at the
+// parent level, so their invocation is recorded as a single tool call.
+type ToolRecorder func(ToolCall)
+
+// Option customizes Runtime construction. Pass zero or more to New.
+type Option func(*options)
+
+type options struct {
+	recorder ToolRecorder
+}
+
+// WithToolRecorder attaches a callback that fires after every tool call on
+// the root agent. Intended for eval/test capture; behavior is unchanged
+// (the callback cannot mutate args or results).
+func WithToolRecorder(fn ToolRecorder) Option {
+	return func(o *options) { o.recorder = fn }
+}
+
 type Runtime struct {
 	appName  string
 	sessions session.Service
@@ -45,9 +76,14 @@ type mcpProbe struct {
 	toolset adktool.Toolset
 }
 
-func New(ctx context.Context, b *bot.Bot, llm adkmodel.LLM) (*Runtime, error) {
-	bld := &builder{}
-	root, err := bld.buildAgent(b.Name, fmt.Sprintf("YAML-defined bot %q", b.Name), b, llm)
+func New(ctx context.Context, b *bot.Bot, llm adkmodel.LLM, opts ...Option) (*Runtime, error) {
+	cfg := options{}
+	for _, o := range opts {
+		o(&cfg)
+	}
+
+	bld := &builder{recorder: cfg.recorder}
+	root, err := bld.buildAgent(b.Name, fmt.Sprintf("YAML-defined bot %q", b.Name), b, llm, true)
 	if err != nil {
 		return nil, err
 	}
@@ -76,14 +112,17 @@ func New(ctx context.Context, b *bot.Bot, llm adkmodel.LLM) (*Runtime, error) {
 // builder threads a shared probe slice through the recursive buildAgent so
 // MCP servers declared anywhere in the bot tree can be preflighted together.
 type builder struct {
-	probes []mcpProbe
+	probes   []mcpProbe
+	recorder ToolRecorder
 }
 
 // buildAgent constructs an ADK llmagent for a bot, recursively wrapping each
 // declared sub-agent as an AgentTool so the parent LLM can invoke it by name.
 // The provided name/description override the bot's own so parent-defined map
-// keys and descriptions drive what the parent LLM sees.
-func (bld *builder) buildAgent(name, description string, b *bot.Bot, llm adkmodel.LLM) (agent.Agent, error) {
+// keys and descriptions drive what the parent LLM sees. isRoot is true only
+// for the top-level call so eval recorders fire once per turn at the outer
+// boundary rather than once per sub-agent level.
+func (bld *builder) buildAgent(name, description string, b *bot.Bot, llm adkmodel.LLM, isRoot bool) (agent.Agent, error) {
 	toolsets := make([]adktool.Toolset, 0, len(b.MCP))
 	for _, m := range b.MCP {
 		ts, err := tool.NewMCP(m)
@@ -121,7 +160,7 @@ func (bld *builder) buildAgent(name, description string, b *bot.Bot, llm adkmode
 		if childDesc == "" {
 			childDesc = fmt.Sprintf("Sub-agent %q", key)
 		}
-		child, err := bld.buildAgent(key, childDesc, ref.Bot, llm)
+		child, err := bld.buildAgent(key, childDesc, ref.Bot, llm, false)
 		if err != nil {
 			return nil, fmt.Errorf("agent %q: %w", key, err)
 		}
@@ -147,6 +186,10 @@ func (bld *builder) buildAgent(name, description string, b *bot.Bot, llm adkmode
 		compiled = append(compiled, th...)
 	}
 	cbs := hook.BuildLLMCallbacks(compiled)
+
+	if isRoot && bld.recorder != nil {
+		cbs.AfterTool = append(cbs.AfterTool, recorderAfterTool(bld.recorder))
+	}
 
 	built, err := llmagent.New(llmagent.Config{
 		Name:                 name,
@@ -302,4 +345,35 @@ func (r *Runtime) ensureSession(ctx context.Context, convID string) error {
 	}
 	r.known[convID] = struct{}{}
 	return nil
+}
+
+// recorderAfterTool builds an ADK AfterToolCallback that snapshots each
+// tool call and forwards it to the recorder. It returns nil to leave the
+// tool's real result untouched. Fires on success and failure alike (ADK
+// still calls after_tool when before_tool vetoes; result is empty, err set).
+func recorderAfterTool(rec ToolRecorder) llmagent.AfterToolCallback {
+	return func(tctx adktool.Context, t adktool.Tool, args, result map[string]any, inErr error) (map[string]any, error) {
+		errMsg := ""
+		if inErr != nil {
+			errMsg = inErr.Error()
+		}
+		rec(ToolCall{
+			Name:   t.Name(),
+			Args:   copyArgs(args),
+			Result: copyArgs(result),
+			ErrMsg: errMsg,
+		})
+		return nil, nil
+	}
+}
+
+func copyArgs(m map[string]any) map[string]any {
+	if m == nil {
+		return nil
+	}
+	out := make(map[string]any, len(m))
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
 }

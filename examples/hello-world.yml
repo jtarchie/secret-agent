@@ -55,3 +55,26 @@ tools:
       who: string!
     js: |
       who.toUpperCase() + "!"
+
+# Declarative eval cases. Run with:
+#   ./secret-agent eval --model <...> --api-key <...> examples/hello-world.yml
+# Each case sends `input` as a single turn to a fresh session, captures the
+# tool-call trajectory, and scores against `expect`. `tool_calls` matches a
+# subsequence (extra calls between matches are fine); `args` is a subset
+# check on the matched call's arguments.
+tests:
+  - name: greets_by_name
+    input: "please greet Ada"
+    expect:
+      tool_calls:
+        - { name: greet, args: { who: "Ada" } }
+      final_output:
+        contains: ["Ada"]
+
+  - name: adds_two_numbers
+    input: "what is 17 plus 25?"
+    expect:
+      tool_calls:
+        - { name: add, args: { a: 17, b: 25 } }
+      final_output:
+        contains: ["42"]
