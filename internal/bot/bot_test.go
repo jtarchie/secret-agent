@@ -576,6 +576,81 @@ groups:
 	}
 }
 
+func TestLoadSlackUsersValid(t *testing.T) {
+	p := writeBot(t, `
+name: b
+system: s
+slack_users:
+  - "U12345"
+  - "  W6789ABC  "
+  - "U12345"
+`)
+	b, err := Load(p)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if len(b.SlackUsers) != 2 {
+		t.Fatalf("len(slack_users) = %d, want 2 (trimmed + deduped); got %v", len(b.SlackUsers), b.SlackUsers)
+	}
+	if b.SlackUsers[0] != "U12345" || b.SlackUsers[1] != "W6789ABC" {
+		t.Errorf("slack_users = %v", b.SlackUsers)
+	}
+}
+
+func TestLoadSlackUsersRejectsBadID(t *testing.T) {
+	p := writeBot(t, `
+name: b
+system: s
+slack_users:
+  - "not-a-slack-id"
+`)
+	_, err := Load(p)
+	if err == nil {
+		t.Fatal("expected error for non-Slack user ID")
+	}
+	if !strings.Contains(err.Error(), "Slack user ID") {
+		t.Errorf("error should mention Slack user ID: %v", err)
+	}
+}
+
+func TestLoadSlackChannelsValid(t *testing.T) {
+	p := writeBot(t, `
+name: b
+system: s
+slack_channels:
+  - "C12345"
+  - "  D67890A  "
+  - "GABCDEF"
+  - "C12345"
+`)
+	b, err := Load(p)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if len(b.SlackChannels) != 3 {
+		t.Fatalf("len(slack_channels) = %d, want 3; got %v", len(b.SlackChannels), b.SlackChannels)
+	}
+	if b.SlackChannels[0] != "C12345" || b.SlackChannels[1] != "D67890A" || b.SlackChannels[2] != "GABCDEF" {
+		t.Errorf("slack_channels = %v", b.SlackChannels)
+	}
+}
+
+func TestLoadSlackChannelsRejectsBadID(t *testing.T) {
+	p := writeBot(t, `
+name: b
+system: s
+slack_channels:
+  - "bad"
+`)
+	_, err := Load(p)
+	if err == nil {
+		t.Fatal("expected error for non-Slack channel ID")
+	}
+	if !strings.Contains(err.Error(), "Slack channel ID") {
+		t.Errorf("error should mention Slack channel ID: %v", err)
+	}
+}
+
 func TestLoadPermissionsInvalidMemory(t *testing.T) {
 	p := writeBot(t, `
 name: b

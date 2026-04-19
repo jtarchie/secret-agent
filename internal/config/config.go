@@ -1,0 +1,138 @@
+// Package config parses the secret-agent run configuration: the list of
+// bot YAML paths to serve and the list of chat transports (Signal, Slack,
+// or CLI) to pump messages through. A single Config instance is the
+// source of truth passed to cmd/secret-agent.
+package config
+
+import (
+	"fmt"
+	"os"
+	"strings"
+
+	"gopkg.in/yaml.v3"
+)
+
+// Config is the top-level shape of the run config file.
+type Config struct {
+	// Bots is an ordered list of bot YAML paths. Paths are relative to the
+	// config file's directory when not absolute.
+	Bots []string `yaml:"bots"`
+	// Transports lists the chat transports to fan out in parallel.
+	Transports []Transport `yaml:"transports"`
+}
+
+// TransportType identifies one of the supported transport implementations.
+type TransportType string
+
+const (
+	TransportSignal TransportType = "signal"
+	TransportSlack  TransportType = "slack"
+	TransportCLI    TransportType = "cli"
+)
+
+// Transport is a single transport stanza in the config file.
+type Transport struct {
+	Type TransportType `yaml:"type"`
+
+	// Signal fields.
+	Account    string `yaml:"account,omitempty"`
+	StateDir   string `yaml:"state_dir,omitempty"`
+	Command    string `yaml:"command,omitempty"`
+	Verbose    int    `yaml:"verbose,omitempty"`
+
+	// Slack fields. Secrets must be supplied via env var indirection.
+	BotTokenEnv string `yaml:"bot_token_env,omitempty"`
+	AppTokenEnv string `yaml:"app_token_env,omitempty"`
+	// Resolved secrets, populated by Load. Not read from YAML.
+	BotToken string `yaml:"-"`
+	AppToken string `yaml:"-"`
+}
+
+// Load reads the config file at path and validates it. Env-var indirection
+// for Slack tokens is resolved here; a missing env var is a hard error.
+func Load(path string) (*Config, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", path, err)
+	}
+	var cfg Config
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
+		return nil, fmt.Errorf("parse %s: %w", path, err)
+	}
+
+	if len(cfg.Bots) == 0 {
+		return nil, fmt.Errorf("%s: at least one bot path is required in `bots:`", path)
+	}
+	for i, p := range cfg.Bots {
+		cfg.Bots[i] = strings.TrimSpace(p)
+		if cfg.Bots[i] == "" {
+			return nil, fmt.Errorf("%s: bots[%d]: must not be empty", path, i)
+		}
+	}
+
+	if len(cfg.Transports) == 0 {
+		return nil, fmt.Errorf("%s: at least one transport is required in `transports:`", path)
+	}
+
+	seen := make(map[TransportType]int, len(cfg.Transports))
+	for i := range cfg.Transports {
+		t := &cfg.Transports[i]
+		t.Type = TransportType(strings.TrimSpace(string(t.Type)))
+		if t.Type == "" {
+			return nil, fmt.Errorf("%s: transports[%d]: type is required", path, i)
+		}
+		if first, dup := seen[t.Type]; dup {
+			return nil, fmt.Errorf("%s: transports[%d]: duplicate type %q (first declared at transports[%d])", path, i, t.Type, first)
+		}
+		seen[t.Type] = i
+		if err := normalizeTransport(t, i, path); err != nil {
+			return nil, err
+		}
+	}
+
+	// CLI transport is mutually exclusive: bubbletea owns stdin/stdout.
+	if _, cliSeen := seen[TransportCLI]; cliSeen && len(cfg.Transports) > 1 {
+		return nil, fmt.Errorf("%s: transports: `cli` cannot be combined with other transports (it owns stdin/stdout)", path)
+	}
+
+	return &cfg, nil
+}
+
+func normalizeTransport(t *Transport, i int, path string) error {
+	switch t.Type {
+	case TransportSignal:
+		t.Account = strings.TrimSpace(t.Account)
+		t.StateDir = strings.TrimSpace(t.StateDir)
+		t.Command = strings.TrimSpace(t.Command)
+		if t.Account == "" {
+			return fmt.Errorf("%s: transports[%d] (signal): account is required", path, i)
+		}
+		if t.StateDir == "" {
+			return fmt.Errorf("%s: transports[%d] (signal): state_dir is required", path, i)
+		}
+	case TransportSlack:
+		t.BotTokenEnv = strings.TrimSpace(t.BotTokenEnv)
+		t.AppTokenEnv = strings.TrimSpace(t.AppTokenEnv)
+		if t.BotTokenEnv == "" {
+			return fmt.Errorf("%s: transports[%d] (slack): bot_token_env is required", path, i)
+		}
+		if t.AppTokenEnv == "" {
+			return fmt.Errorf("%s: transports[%d] (slack): app_token_env is required", path, i)
+		}
+		bot := os.Getenv(t.BotTokenEnv)
+		if bot == "" {
+			return fmt.Errorf("%s: transports[%d] (slack): $%s is empty", path, i, t.BotTokenEnv)
+		}
+		app := os.Getenv(t.AppTokenEnv)
+		if app == "" {
+			return fmt.Errorf("%s: transports[%d] (slack): $%s is empty", path, i, t.AppTokenEnv)
+		}
+		t.BotToken = bot
+		t.AppToken = app
+	case TransportCLI:
+		// CLI has no required fields.
+	default:
+		return fmt.Errorf("%s: transports[%d]: unknown type %q (want signal|slack|cli)", path, i, t.Type)
+	}
+	return nil
+}

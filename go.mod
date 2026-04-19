@@ -14,6 +14,8 @@ require (
 	github.com/google/jsonschema-go v0.4.2
 	github.com/mdp/qrterminal/v3 v3.2.1
 	github.com/modelcontextprotocol/go-sdk v1.4.1
+	github.com/slack-go/slack v0.22.0
+	golang.org/x/sync v0.20.0
 	google.golang.org/adk v1.1.0
 	google.golang.org/genai v1.54.0
 	gopkg.in/yaml.v3 v3.0.1

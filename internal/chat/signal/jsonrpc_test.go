@@ -191,6 +191,20 @@ func TestClientReceiveNotification(t *testing.T) {
 	}
 }
 
+// waitForPending spins until c has exactly n pending responses registered.
+// Used to serialize goroutine startup in TestClientConcurrentCalls so the
+// IDs assigned by nextID.Add are deterministic.
+func waitForPending(c *client, n int) {
+	for {
+		c.pendingM.Lock()
+		got := len(c.pending)
+		c.pendingM.Unlock()
+		if got >= n {
+			return
+		}
+	}
+}
+
 func TestClientConcurrentCalls(t *testing.T) {
 	// Two calls sent concurrently should each get their matching response by id.
 	// We synthesize responses in the *reverse* order they were issued to
@@ -214,24 +228,21 @@ func TestClientConcurrentCalls(t *testing.T) {
 	var res1, res2 json.RawMessage
 	var err1, err2 error
 
+	// Start "a" and wait for it to register pending before starting "b" so
+	// id-assignment order is deterministic: a gets id=1, b gets id=2.
+	// Without this, the goroutine scheduler picks which goroutine calls
+	// nextID.Add(1) first, and the response-by-id assertions below flip.
 	go func() {
 		defer wg.Done()
 		res1, err1 = c.call("a", nil)
 	}()
+	waitForPending(c, 1)
+
 	go func() {
 		defer wg.Done()
 		res2, err2 = c.call("b", nil)
 	}()
-
-	// Allow the two goroutines to register their pending channels.
-	for {
-		c.pendingM.Lock()
-		n := len(c.pending)
-		c.pendingM.Unlock()
-		if n == 2 {
-			break
-		}
-	}
+	waitForPending(c, 2)
 
 	// Respond id=2 first, then id=1.
 	pw.Write([]byte(`{"jsonrpc":"2.0","id":2,"result":{"v":"second"}}` + "\n"))

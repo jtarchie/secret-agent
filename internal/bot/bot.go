@@ -13,17 +13,23 @@ import (
 )
 
 type Bot struct {
-	Name        string              `yaml:"name"`
-	System      string              `yaml:"system"`
-	Triggers    []string            `yaml:"triggers,omitempty"`
-	Users       []string            `yaml:"users,omitempty"`
-	Groups      []string            `yaml:"groups,omitempty"`
-	Permissions Permissions         `yaml:"permissions,omitempty"`
-	Tools       []Tool              `yaml:"tools"`
-	Agents      map[string]AgentRef `yaml:"agents"`
-	Hooks       []Hook              `yaml:"hooks"`
-	MCP         []MCPServer         `yaml:"mcp,omitempty"`
-	Tests       []TestCase          `yaml:"tests,omitempty"`
+	Name     string   `yaml:"name"`
+	System   string   `yaml:"system"`
+	Triggers []string `yaml:"triggers,omitempty"`
+	// Users and Groups scope the bot to Signal E.164 phone numbers and
+	// signal-cli group IDs respectively.
+	Users  []string `yaml:"users,omitempty"`
+	Groups []string `yaml:"groups,omitempty"`
+	// SlackUsers and SlackChannels scope the bot to Slack user IDs (U...)
+	// and channel IDs (C... for public, D... for DMs, G... for private).
+	SlackUsers    []string            `yaml:"slack_users,omitempty"`
+	SlackChannels []string            `yaml:"slack_channels,omitempty"`
+	Permissions   Permissions         `yaml:"permissions,omitempty"`
+	Tools         []Tool              `yaml:"tools"`
+	Agents        map[string]AgentRef `yaml:"agents"`
+	Hooks         []Hook              `yaml:"hooks"`
+	MCP           []MCPServer         `yaml:"mcp,omitempty"`
+	Tests         []TestCase          `yaml:"tests,omitempty"`
 }
 
 // TestCase is one declarative eval. The runner sends Input as a single user
@@ -204,6 +210,8 @@ var (
 	shorthandRe    = regexp.MustCompile(`^(string|integer|number|boolean|attachment)(!)?(?:=(.*))?$`)
 	paramNameRe    = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 	e164Re         = regexp.MustCompile(`^\+[1-9]\d{6,14}$`)
+	slackUserRe    = regexp.MustCompile(`^[UW][A-Z0-9]{2,}$`)
+	slackChannelRe = regexp.MustCompile(`^[CDG][A-Z0-9]{2,}$`)
 	reservedParams = map[string]struct{}{
 		"path": {}, "home": {}, "user": {}, "shell": {}, "pwd": {},
 		"ifs": {}, "ld_preload": {}, "ld_library_path": {},
@@ -523,6 +531,46 @@ func loadBot(path string, visited map[string]bool, depth int) (*Bot, error) {
 			deduped = append(deduped, g)
 		}
 		b.Groups = deduped
+	}
+
+	if len(b.SlackUsers) > 0 {
+		seen := make(map[string]struct{}, len(b.SlackUsers))
+		deduped := b.SlackUsers[:0]
+		for i, u := range b.SlackUsers {
+			u = strings.TrimSpace(u)
+			if u == "" {
+				return nil, fmt.Errorf("%s: slack_users[%d]: must not be empty", path, i)
+			}
+			if !slackUserRe.MatchString(u) {
+				return nil, fmt.Errorf("%s: slack_users[%d]: %q is not a valid Slack user ID (expected U... or W...)", path, i, u)
+			}
+			if _, dup := seen[u]; dup {
+				continue
+			}
+			seen[u] = struct{}{}
+			deduped = append(deduped, u)
+		}
+		b.SlackUsers = deduped
+	}
+
+	if len(b.SlackChannels) > 0 {
+		seen := make(map[string]struct{}, len(b.SlackChannels))
+		deduped := b.SlackChannels[:0]
+		for i, c := range b.SlackChannels {
+			c = strings.TrimSpace(c)
+			if c == "" {
+				return nil, fmt.Errorf("%s: slack_channels[%d]: must not be empty", path, i)
+			}
+			if !slackChannelRe.MatchString(c) {
+				return nil, fmt.Errorf("%s: slack_channels[%d]: %q is not a valid Slack channel ID (expected C..., D..., or G...)", path, i, c)
+			}
+			if _, dup := seen[c]; dup {
+				continue
+			}
+			seen[c] = struct{}{}
+			deduped = append(deduped, c)
+		}
+		b.SlackChannels = deduped
 	}
 
 	for i := range b.Tools {

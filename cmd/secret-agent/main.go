@@ -7,13 +7,18 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
+
+	"golang.org/x/sync/errgroup"
 
 	"github.com/jtarchie/secret-agent/internal/bot"
 	"github.com/jtarchie/secret-agent/internal/chat"
 	"github.com/jtarchie/secret-agent/internal/chat/cli"
 	signaltransport "github.com/jtarchie/secret-agent/internal/chat/signal"
+	slacktransport "github.com/jtarchie/secret-agent/internal/chat/slack"
+	"github.com/jtarchie/secret-agent/internal/config"
 	"github.com/jtarchie/secret-agent/internal/eval"
 	"github.com/jtarchie/secret-agent/internal/model"
 	"github.com/jtarchie/secret-agent/internal/router"
@@ -30,15 +35,12 @@ func newLogger(verbose int) *slog.Logger {
 }
 
 const usage = `usage:
-  secret-agent run --model <provider/model-name> --api-key <key> [--transport cli|signal] [--skip-preflight] [signal flags] <bot.yml> [bot.yml ...]
+  secret-agent run --model <provider/model-name> --api-key <key> --config <path> [--skip-preflight]
   secret-agent eval --model <provider/model-name> --api-key <key> [--skip-preflight] [--verbose] <bot.yml>
   secret-agent signal-link --signal-state-dir <path> [--signal-device-name <name>]
 
 examples:
-  secret-agent run --model openrouter/anthropic/claude-sonnet-4-5 --api-key $OPENROUTER_API_KEY examples/hello-world.yml
-  secret-agent run --model anthropic/claude-sonnet-4-5-20250929 --api-key $ANTHROPIC_API_KEY \
-      --transport signal --signal-account +15551234567 --signal-state-dir ./signal-state \
-      examples/admin-bot.yml examples/public-bot.yml
+  secret-agent run --model openrouter/anthropic/claude-sonnet-4-5 --api-key $OPENROUTER_API_KEY --config config.yml
   secret-agent eval --model anthropic/claude-sonnet-4-5-20250929 --api-key $ANTHROPIC_API_KEY examples/hello-world.yml
   secret-agent signal-link --signal-state-dir ./signal-state
 `
@@ -74,10 +76,7 @@ func runRun(args []string) error {
 	modelFlag := fs.String("model", "", "provider/model-name (e.g. openrouter/anthropic/claude-sonnet-4-5)")
 	keyFlag := fs.String("api-key", "", "API key for the model provider")
 	baseURLFlag := fs.String("base-url", "", "override the provider's base URL (e.g. http://127.0.0.1:1234/v1 for a local OpenAI-compatible server)")
-	transportFlag := fs.String("transport", "cli", "chat transport: cli | signal")
-	signalAccountFlag := fs.String("signal-account", "", "Signal phone number (E.164) for --transport=signal")
-	signalStateDirFlag := fs.String("signal-state-dir", "", "directory for signal-cli state (keys, ratchet state); required for --transport=signal")
-	signalCmdFlag := fs.String("signal-cli", "signal-cli", "path to the signal-cli binary")
+	configFlag := fs.String("config", "", "path to the run config file (bots + transports)")
 	skipPreflightFlag := fs.Bool("skip-preflight", false, "skip the startup check that verifies the model endpoint is reachable and the API key is valid")
 	mcpPreflightTimeoutFlag := fs.Duration("mcp-preflight-timeout", 5*time.Second, "per-server timeout for the startup MCP tool-listing probe; 0 disables the deadline")
 	verboseFlag := fs.Int("verbose", 0, "verbosity: 0 info, 1 debug + signal-cli -v, 2 debug + signal-cli -vv, 3 debug + signal-cli -vvv")
@@ -85,14 +84,14 @@ func runRun(args []string) error {
 		return err
 	}
 
-	if *modelFlag == "" || *keyFlag == "" || fs.NArg() < 1 {
+	if *modelFlag == "" || *keyFlag == "" || *configFlag == "" {
 		fmt.Fprint(os.Stderr, usage)
-		return fmt.Errorf("--model, --api-key, and at least one bot YAML path are required")
+		return fmt.Errorf("--model, --api-key, and --config are required")
 	}
 
-	paths := fs.Args()
-	if *transportFlag == "cli" && len(paths) > 1 {
-		return fmt.Errorf("--transport=cli only supports a single bot YAML (got %d)", len(paths))
+	cfg, err := config.Load(*configFlag)
+	if err != nil {
+		return err
 	}
 
 	provider, name := model.SplitModel(*modelFlag)
@@ -115,8 +114,12 @@ func runRun(args []string) error {
 
 	logger := newLogger(*verboseFlag)
 
-	routes := make([]router.Route, 0, len(paths))
-	for _, p := range paths {
+	configDir := filepath.Dir(*configFlag)
+	routes := make([]router.Route, 0, len(cfg.Bots))
+	for _, p := range cfg.Bots {
+		if !filepath.IsAbs(p) {
+			p = filepath.Join(configDir, p)
+		}
 		b, err := bot.Load(p)
 		if err != nil {
 			return err
@@ -142,28 +145,56 @@ func runRun(args []string) error {
 		return err
 	}
 
-	primaryName := routes[0].Bot.Name
-
-	var transport chat.Transport
-	switch *transportFlag {
-	case "cli":
-		transport = cli.New()
-	case "signal":
-		if *signalAccountFlag == "" || *signalStateDirFlag == "" {
-			return fmt.Errorf("--transport=signal requires --signal-account and --signal-state-dir")
-		}
-		transport = signaltransport.New(
-			*signalAccountFlag,
-			*signalStateDirFlag,
-			signaltransport.WithCommand(*signalCmdFlag),
-			signaltransport.WithLogger(logger),
-			signaltransport.WithVerbose(*verboseFlag),
-		)
-	default:
-		return fmt.Errorf("unknown --transport %q (want cli or signal)", *transportFlag)
+	transports, err := buildTransports(cfg, logger, routes, *verboseFlag)
+	if err != nil {
+		return err
 	}
 
-	return transport.Run(ctx, primaryName, rtr)
+	g, gctx := errgroup.WithContext(ctx)
+	for _, tp := range transports {
+		tp := tp
+		g.Go(func() error { return tp.Run(gctx, rtr) })
+	}
+	if err := g.Wait(); err != nil && err != context.Canceled {
+		return err
+	}
+	return nil
+}
+
+// buildTransports instantiates each transport from the config. The routes
+// slice is used to pick a bot name for the CLI transport's TUI label.
+func buildTransports(cfg *config.Config, logger *slog.Logger, routes []router.Route, verbose int) ([]chat.Transport, error) {
+	out := make([]chat.Transport, 0, len(cfg.Transports))
+	for _, t := range cfg.Transports {
+		switch t.Type {
+		case config.TransportCLI:
+			if len(routes) > 1 {
+				return nil, fmt.Errorf("transport cli requires exactly one bot (got %d)", len(routes))
+			}
+			out = append(out, cli.New(cli.WithBotName(routes[0].Bot.Name)))
+		case config.TransportSignal:
+			cmd := t.Command
+			if cmd == "" {
+				cmd = "signal-cli"
+			}
+			out = append(out, signaltransport.New(
+				t.Account,
+				t.StateDir,
+				signaltransport.WithCommand(cmd),
+				signaltransport.WithLogger(logger),
+				signaltransport.WithVerbose(verbose),
+			))
+		case config.TransportSlack:
+			out = append(out, slacktransport.New(
+				t.BotToken,
+				t.AppToken,
+				slacktransport.WithLogger(logger),
+			))
+		default:
+			return nil, fmt.Errorf("unknown transport type %q", t.Type)
+		}
+	}
+	return out, nil
 }
 
 func runEval(args []string) error {

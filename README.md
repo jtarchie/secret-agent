@@ -1,7 +1,9 @@
 # secret-agent
 
-A YAML-defined chat bot with pluggable transports. Ships a terminal CLI
-and a Signal transport backed by [signal-cli](https://github.com/AsamK/signal-cli).
+A YAML-defined chat bot with pluggable transports. Ships a terminal CLI,
+a Signal transport backed by [signal-cli](https://github.com/AsamK/signal-cli),
+and a Slack transport using Socket Mode. Multiple transports can run
+concurrently in one process.
 
 ## Build
 
@@ -39,14 +41,22 @@ per-peer ratchet state. Back it up — wiping it means re-linking.
 
 ### 3. Run the bot
 
+Create a `config.yml` (see [examples/config.yml](examples/config.yml)):
+
+```yaml
+bots:
+  - examples/hello-world.yml
+transports:
+  - type: signal
+    account: "+15551234567"
+    state_dir: ./signal-state
+```
+
 ```sh
 ./secret-agent run \
-  --transport signal \
-  --signal-account +15551234567 \
-  --signal-state-dir ./signal-state \
+  --config config.yml \
   --model anthropic/claude-sonnet-4-5-20250929 \
-  --api-key "$ANTHROPIC_API_KEY" \
-  examples/hello-world.yml
+  --api-key "$ANTHROPIC_API_KEY"
 ```
 
 Send the linked account a Signal DM; the bot replies. Group messages are
@@ -65,15 +75,67 @@ Each Signal contact gets its own in-memory conversation context
 
 ## Getting Started — Terminal CLI
 
-```sh
-./secret-agent run \
-  --model anthropic/claude-sonnet-4-5-20250929 \
-  --api-key "$ANTHROPIC_API_KEY" \
-  examples/hello-world.yml
+`cli-config.yml`:
+
+```yaml
+bots:
+  - examples/hello-world.yml
+transports:
+  - type: cli
 ```
 
-`--transport cli` is the default. Slash commands: `/help`, `/clear`,
-`/copy`, `/quit`.
+```sh
+./secret-agent run \
+  --config cli-config.yml \
+  --model anthropic/claude-sonnet-4-5-20250929 \
+  --api-key "$ANTHROPIC_API_KEY"
+```
+
+The CLI transport owns stdin/stdout and therefore can't be combined with
+other transports. Slash commands: `/help`, `/clear`, `/copy`, `/quit`.
+
+## Getting Started — Slack
+
+Socket Mode: a persistent WebSocket opened with an app-level token, so no
+public ingress is required.
+
+### 1. Create a Slack app
+
+1. https://api.slack.com/apps → **Create New App** → **From scratch**.
+2. **Socket Mode** → enable; generate an app-level token (scope
+   `connections:write`). This is your `SLACK_APP_TOKEN` (`xapp-…`).
+3. **OAuth & Permissions** → add bot scopes: `app_mentions:read`,
+   `channels:history`, `chat:write`, `files:read`, `groups:history`,
+   `im:history`, `mpim:history`, `users:read`. Install to a workspace →
+   copy the bot token (`xoxb-…`) as `SLACK_BOT_TOKEN`.
+4. **Event Subscriptions** (enabled by Socket Mode): subscribe to
+   `message.im`, `message.channels`, `message.groups`, `message.mpim`.
+5. Invite the bot to a test channel and note its channel ID
+   (`CXXXXXXX`) and your user ID (`UXXXXXXX`).
+
+### 2. Scope the bot
+
+Add `slack_users:` and/or `slack_channels:` alongside the existing
+`users:` / `groups:` fields in a bot YAML. Leave empty to allow all.
+
+### 3. Run
+
+```yaml
+bots:
+  - examples/hello-world.yml
+transports:
+  - type: slack
+    bot_token_env: SLACK_BOT_TOKEN
+    app_token_env: SLACK_APP_TOKEN
+```
+
+```sh
+SLACK_BOT_TOKEN=xoxb-… SLACK_APP_TOKEN=xapp-… \
+  ./secret-agent run --config config.yml --model … --api-key …
+```
+
+Replies go back on the transport that received the prompt. Threaded DMs
+and channel messages each get their own conversation memory.
 
 ### Attaching files
 
@@ -171,22 +233,40 @@ Exactly one of `command` / `url` is required.
 
 ## Command-line reference
 
-### `secret-agent run <bot.yml> [bot.yml ...]`
+### `secret-agent run --config <path>`
 
-Accepts one bot or many. With multiple bots (Signal only), the router selects one bot per incoming message based on each bot's `users:` / `groups:` scope and `triggers:`. Bots' trigger words must be globally disjoint; every multi-bot run requires ≥1 trigger on each bot. See *Multi-bot routing* below.
-
+Bots and transports are declared in a YAML config file. See
+[examples/config.yml](examples/config.yml). With multiple bots, the router
+selects one bot per incoming message based on each bot's transport-specific
+scope (`users:`/`groups:` for Signal, `slack_users:`/`slack_channels:` for
+Slack) and `triggers:`. Multiple transports run concurrently in separate
+goroutines; a reply always returns on the transport that received the
+prompt.
 
 | Flag | Default | Purpose |
 |---|---|---|
 | `--model` | — | **Required.** `provider/model-name` (e.g. `anthropic/claude-sonnet-4-5-20250929`). |
 | `--api-key` | — | **Required.** Model provider API key. |
+| `--config` | — | **Required.** Path to the run config file (bots + transports). |
 | `--base-url` | — | Override provider base URL (e.g. local OpenAI-compatible server). |
-| `--transport` | `cli` | `cli` or `signal`. |
-| `--signal-account` | — | E.164 phone; required when `--transport=signal`. |
-| `--signal-state-dir` | — | signal-cli state dir; required when `--transport=signal`. |
-| `--signal-cli` | `signal-cli` | Path to the signal-cli binary. |
 | `--skip-preflight` | `false` | Skip model endpoint / API key validation at startup. |
 | `--verbose` | `0` | 0=info, 1/2/3=debug with signal-cli `-v` / `-vv` / `-vvv`. |
+
+### Config file
+
+```yaml
+bots:
+  - examples/hello-world.yml           # relative paths resolve to the config dir
+transports:
+  - type: signal
+    account: "+15551234567"
+    state_dir: ./signal-state
+    command: signal-cli                # optional; defaults to "signal-cli"
+  - type: slack
+    bot_token_env: SLACK_BOT_TOKEN     # env var names, never inline secrets
+    app_token_env: SLACK_APP_TOKEN
+  # - type: cli                         # exclusive with other transports
+```
 
 ### `secret-agent eval <bot.yml>`
 
@@ -255,14 +335,23 @@ Constraints enforced at load time:
 
 - Every bot in multi-bot mode must declare ≥1 trigger.
 - Trigger words must be globally disjoint across bots (case-insensitive). Load fails with an aggregated list of conflicting words.
-- The CLI transport (`--transport=cli`) only accepts a single bot.
+- The CLI transport cannot be combined with other transports (it owns stdin/stdout).
 
-Run two bots together:
+Run two bots together (config-driven):
+
+```yaml
+bots:
+  - examples/routing/admin-bot.yml
+  - examples/routing/public-bot.yml
+transports:
+  - type: signal
+    account: "+15551234567"
+    state_dir: ./signal-state
+```
 
 ```bash
-./secret-agent run --model anthropic/claude-sonnet-4-5-20250929 --api-key $ANTHROPIC_API_KEY \
-  --transport signal --signal-account +15551234567 --signal-state-dir ./signal-state \
-  examples/routing/admin-bot.yml examples/routing/public-bot.yml
+./secret-agent run --config routing.yml \
+  --model anthropic/claude-sonnet-4-5-20250929 --api-key $ANTHROPIC_API_KEY
 ```
 
 See [examples/routing/](examples/routing/) for a runnable two-bot fleet.

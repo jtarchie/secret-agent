@@ -21,6 +21,7 @@ import (
 
 type Transport struct {
 	markdown bool
+	botName  string
 }
 
 type Option func(*Transport)
@@ -29,8 +30,14 @@ func WithMarkdown(on bool) Option {
 	return func(t *Transport) { t.markdown = on }
 }
 
+// WithBotName sets the label shown in the TUI for the bot's replies.
+// Defaults to "bot" when unset.
+func WithBotName(name string) Option {
+	return func(t *Transport) { t.botName = name }
+}
+
 func New(opts ...Option) *Transport {
-	t := &Transport{markdown: true}
+	t := &Transport{markdown: true, botName: "bot"}
 	for _, opt := range opts {
 		opt(t)
 	}
@@ -42,14 +49,21 @@ func New(opts ...Option) *Transport {
 // so it synthesizes a stub envelope for every send.
 type handlerFunc func(ctx context.Context, msg chat.Message) <-chan chat.Chunk
 
-func (t *Transport) Run(ctx context.Context, botName string, d chat.Dispatcher) error {
+func (t *Transport) Run(ctx context.Context, d chat.Dispatcher) error {
 	handler := handlerFunc(func(ctx context.Context, msg chat.Message) <-chan chat.Chunk {
-		return d.Dispatch(ctx, chat.Envelope{ConvID: "local", Kind: "cli"}, msg)
+		return d.Dispatch(ctx, chat.Envelope{ConvID: "local", Kind: "cli", Transport: "cli"}, msg)
 	})
-	_, err := tea.NewProgram(
-		newModel(ctx, botName, handler, t.markdown),
+	prog := tea.NewProgram(
+		newModel(ctx, t.botName, handler, t.markdown),
 		tea.WithAltScreen(),
-	).Run()
+	)
+	// Shut the TUI down when a sibling transport cancels ctx. Without this,
+	// bubbletea's alt-screen keeps reading stdin and the process wedges.
+	go func() {
+		<-ctx.Done()
+		prog.Quit()
+	}()
+	_, err := prog.Run()
 	return err
 }
 

@@ -323,6 +323,68 @@ func TestRouterAttachmentsForwardedWhenAllowed(t *testing.T) {
 	}
 }
 
+func TestScopeMatchesByTransport(t *testing.T) {
+	b := &bot.Bot{
+		Name:          "mixed",
+		Triggers:      []string{"@ask"},
+		Users:         []string{"+15551111111"},
+		Groups:        []string{"signal-group-A"},
+		SlackUsers:    []string{"U11111"},
+		SlackChannels: []string{"C11111"},
+	}
+	rt, err := RouteFromBot(b, (&recordingHandler{}).factory())
+	if err != nil {
+		t.Fatalf("RouteFromBot: %v", err)
+	}
+
+	cases := []struct {
+		name string
+		env  chat.Envelope
+		want bool
+	}{
+		{"signal dm in scope", chat.Envelope{Transport: "signal", Kind: "dm", SenderPhone: "+15551111111"}, true},
+		{"signal dm out of scope", chat.Envelope{Transport: "signal", Kind: "dm", SenderPhone: "+15559999999"}, false},
+		{"signal group in scope", chat.Envelope{Transport: "signal", Kind: "group", GroupID: "signal-group-A", SenderPhone: "+15551111111"}, true},
+		{"signal group wrong user", chat.Envelope{Transport: "signal", Kind: "group", GroupID: "signal-group-A", SenderPhone: "+15559999999"}, false},
+		{"signal group wrong group", chat.Envelope{Transport: "signal", Kind: "group", GroupID: "signal-group-B", SenderPhone: "+15551111111"}, false},
+		{"empty transport treated as signal", chat.Envelope{Kind: "dm", SenderPhone: "+15551111111"}, true},
+		{"slack dm in scope", chat.Envelope{Transport: "slack", Kind: "dm", SenderID: "U11111"}, true},
+		{"slack dm out of scope", chat.Envelope{Transport: "slack", Kind: "dm", SenderID: "U99999"}, false},
+		{"slack group in scope", chat.Envelope{Transport: "slack", Kind: "group", GroupID: "C11111", SenderID: "U11111"}, true},
+		{"slack group wrong channel", chat.Envelope{Transport: "slack", Kind: "group", GroupID: "C99999", SenderID: "U11111"}, false},
+		{"slack group wrong user", chat.Envelope{Transport: "slack", Kind: "group", GroupID: "C11111", SenderID: "U99999"}, false},
+		{"slack dm missing sender id", chat.Envelope{Transport: "slack", Kind: "dm"}, false},
+		{"cli always matches", chat.Envelope{Transport: "cli", Kind: "cli"}, true},
+		{"slack ignores signal scope fields", chat.Envelope{Transport: "slack", Kind: "dm", SenderPhone: "+15551111111"}, false},
+		{"signal ignores slack scope fields", chat.Envelope{Transport: "signal", Kind: "dm", SenderID: "U11111"}, false},
+	}
+
+	for _, tc := range cases {
+		got := rt.scopeMatches(tc.env)
+		if got != tc.want {
+			t.Errorf("%s: got %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestScopeMatchesEmptyScopeMatchesAll(t *testing.T) {
+	b := &bot.Bot{Name: "unscoped", Triggers: []string{"@x"}}
+	rt, err := RouteFromBot(b, (&recordingHandler{}).factory())
+	if err != nil {
+		t.Fatalf("RouteFromBot: %v", err)
+	}
+	envs := []chat.Envelope{
+		{Transport: "signal", Kind: "dm", SenderPhone: "+15559999999"},
+		{Transport: "slack", Kind: "dm", SenderID: "U99999"},
+		{Transport: "slack", Kind: "group", GroupID: "C99999", SenderID: "U99999"},
+	}
+	for _, env := range envs {
+		if !rt.scopeMatches(env) {
+			t.Errorf("empty-scope route should match %+v", env)
+		}
+	}
+}
+
 func TestRouterGroupMessageSilentOnNoTrigger(t *testing.T) {
 	b := &bot.Bot{Name: "only", Triggers: []string{"@ask"}}
 	h := &recordingHandler{replyText: "ok"}

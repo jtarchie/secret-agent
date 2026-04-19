@@ -33,6 +33,8 @@ type Route struct {
 	matcher       *triggerMatcher
 	users         map[string]struct{}
 	groups        map[string]struct{}
+	slackUsers    map[string]struct{}
+	slackChannels map[string]struct{}
 	attachmentsOK bool
 	bufferingOn   bool
 }
@@ -53,6 +55,14 @@ func RouteFromBot(b *bot.Bot, h HandlerFactory) (Route, error) {
 	for _, g := range b.Groups {
 		groups[g] = struct{}{}
 	}
+	slackUsers := make(map[string]struct{}, len(b.SlackUsers))
+	for _, u := range b.SlackUsers {
+		slackUsers[u] = struct{}{}
+	}
+	slackChannels := make(map[string]struct{}, len(b.SlackChannels))
+	for _, c := range b.SlackChannels {
+		slackChannels[c] = struct{}{}
+	}
 
 	return Route{
 		Bot:           b,
@@ -60,6 +70,8 @@ func RouteFromBot(b *bot.Bot, h HandlerFactory) (Route, error) {
 		matcher:       m,
 		users:         users,
 		groups:        groups,
+		slackUsers:    slackUsers,
+		slackChannels: slackChannels,
 		attachmentsOK: b.Permissions.AttachmentsAllowed(),
 		bufferingOn:   b.Permissions.MemoryOrDefault() == bot.MemoryFull,
 	}, nil
@@ -143,29 +155,44 @@ func closedChan() <-chan chat.Chunk {
 
 // scopeMatches reports whether a route covers this envelope's sender and
 // group context. Empty user/group scope means "all".
+//
+// Which scope lists are consulted depends on env.Transport:
+//
+//	"signal" (or "") → users + groups, keyed on SenderPhone / GroupID
+//	"slack"          → slackUsers + slackChannels, keyed on SenderID / GroupID
+//	"cli"            → always matches (CLI has no identity scoping)
 func (rt *Route) scopeMatches(env chat.Envelope) bool {
+	if env.Transport == "cli" {
+		return true
+	}
+
+	users, groups, senderKey := rt.users, rt.groups, env.SenderPhone
+	if env.Transport == "slack" {
+		users, groups, senderKey = rt.slackUsers, rt.slackChannels, env.SenderID
+	}
+
 	if env.Kind == "group" {
-		if len(rt.groups) > 0 {
-			if _, ok := rt.groups[env.GroupID]; !ok {
+		if len(groups) > 0 {
+			if _, ok := groups[env.GroupID]; !ok {
 				return false
 			}
 		}
-		if len(rt.users) > 0 {
-			if env.SenderPhone == "" {
+		if len(users) > 0 {
+			if senderKey == "" {
 				return false
 			}
-			if _, ok := rt.users[env.SenderPhone]; !ok {
+			if _, ok := users[senderKey]; !ok {
 				return false
 			}
 		}
 		return true
 	}
 
-	if len(rt.users) > 0 {
-		if env.SenderPhone == "" {
+	if len(users) > 0 {
+		if senderKey == "" {
 			return false
 		}
-		if _, ok := rt.users[env.SenderPhone]; !ok {
+		if _, ok := users[senderKey]; !ok {
 			return false
 		}
 	}

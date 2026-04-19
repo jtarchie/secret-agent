@@ -68,7 +68,7 @@ func New(account, stateDir string, opts ...Option) *Transport {
 
 // Run spawns signal-cli and pumps incoming messages through the dispatcher.
 // Returns when the context is canceled or signal-cli exits.
-func (t *Transport) Run(ctx context.Context, botName string, dispatcher chat.Dispatcher) error {
+func (t *Transport) Run(ctx context.Context, dispatcher chat.Dispatcher) error {
 	if t.account == "" {
 		return fmt.Errorf("signal transport: account is required")
 	}
@@ -198,6 +198,8 @@ func (t *Transport) dispatchReceive(
 	chatEnv := chat.Envelope{
 		ConvID:      conv.key,
 		Kind:        conv.kind,
+		Transport:   "signal",
+		SenderID:    env.SourceNumber,
 		SenderPhone: env.SourceNumber,
 		GroupID:     conv.groupID,
 	}
