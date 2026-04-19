@@ -5,7 +5,17 @@ a Signal transport backed by [signal-cli](https://github.com/AsamK/signal-cli),
 and a Slack transport using Socket Mode. Multiple transports can run
 concurrently in one process.
 
-## Build
+## Installation
+
+```bash
+brew tap jtarchie/secret-agent https://github.com/jtarchie/secret-agent
+brew install secret-agent
+```
+
+Or download a pre-built binary from the
+[releases page](https://github.com/jtarchie/secret-agent/releases).
+
+## Build from source
 
 ```sh
 go build -o secret-agent ./cmd/secret-agent
