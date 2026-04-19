@@ -31,7 +31,7 @@ func NewJs(name, description, code string, params map[string]bot.Param) (adktool
 		return nil, fmt.Errorf("build schema: %w", err)
 	}
 
-	return functiontool.New(
+	tool, err := functiontool.New(
 		functiontool.Config{
 			Name:        name,
 			Description: description,
@@ -45,7 +45,8 @@ func NewJs(name, description, code string, params map[string]bot.Param) (adktool
 
 			vm := goja.New()
 			for k, v := range env {
-				if err := vm.Set(k, v); err != nil {
+				err := vm.Set(k, v)
+				if err != nil {
 					return shellResult{}, fmt.Errorf("%s: bind %q: %w", name, k, err)
 				}
 			}
@@ -77,4 +78,8 @@ func NewJs(name, description, code string, params map[string]bot.Param) (adktool
 			return shellResult{Output: string(b)}, nil
 		},
 	)
+	if err != nil {
+		return nil, fmt.Errorf("new js tool: %w", err)
+	}
+	return tool, nil
 }

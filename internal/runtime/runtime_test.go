@@ -28,7 +28,8 @@ var pngBytes = []byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 0
 func TestBuildUserContentSniffsMime(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "img.bin")
-	if err := os.WriteFile(path, pngBytes, 0o600); err != nil {
+	err := os.WriteFile(path, pngBytes, 0o600)
+	if err != nil {
 		t.Fatalf("write: %v", err)
 	}
 
@@ -37,7 +38,7 @@ func TestBuildUserContentSniffsMime(t *testing.T) {
 		Attachments: []chat.Attachment{{Path: path, Filename: "img.bin"}},
 	})
 	if err != nil {
-		t.Fatalf("err: %v", err)
+		t.Fatalf("build err: %v", err)
 	}
 	if len(c.Parts) != 2 {
 		t.Fatalf("parts = %d, want 2", len(c.Parts))
@@ -56,7 +57,8 @@ func TestBuildUserContentSniffsMime(t *testing.T) {
 func TestBuildUserContentUsesProvidedMime(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "doc.pdf")
-	if err := os.WriteFile(path, []byte("not really a pdf"), 0o600); err != nil {
+	err := os.WriteFile(path, []byte("not really a pdf"), 0o600)
+	if err != nil {
 		t.Fatalf("write: %v", err)
 	}
 
@@ -68,7 +70,7 @@ func TestBuildUserContentUsesProvidedMime(t *testing.T) {
 		}},
 	})
 	if err != nil {
-		t.Fatalf("err: %v", err)
+		t.Fatalf("build err: %v", err)
 	}
 	if len(c.Parts) != 2 {
 		t.Fatalf("parts = %d, want 2 (manifest + inline)", len(c.Parts))
@@ -84,12 +86,14 @@ func TestBuildUserContentUsesProvidedMime(t *testing.T) {
 func TestBuildUserContentManifest(t *testing.T) {
 	dir := t.TempDir()
 	p1 := filepath.Join(dir, "photo.bin")
-	if err := os.WriteFile(p1, pngBytes, 0o600); err != nil {
-		t.Fatalf("write: %v", err)
+	err := os.WriteFile(p1, pngBytes, 0o600)
+	if err != nil {
+		t.Fatalf("write p1: %v", err)
 	}
 	p2 := filepath.Join(dir, "doc.pdf")
-	if err := os.WriteFile(p2, []byte("x"), 0o600); err != nil {
-		t.Fatalf("write: %v", err)
+	err = os.WriteFile(p2, []byte("x"), 0o600)
+	if err != nil {
+		t.Fatalf("write p2: %v", err)
 	}
 
 	c, err := buildUserContent(chat.Message{
@@ -128,7 +132,8 @@ func TestBuildUserContentInlinesTextAttachments(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "notes.md")
 	body := "# Hello\n\nthis is the body"
-	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+	err := os.WriteFile(path, []byte(body), 0o600)
+	if err != nil {
 		t.Fatalf("write: %v", err)
 	}
 
@@ -139,7 +144,7 @@ func TestBuildUserContentInlinesTextAttachments(t *testing.T) {
 		},
 	})
 	if err != nil {
-		t.Fatalf("err: %v", err)
+		t.Fatalf("build err: %v", err)
 	}
 	// Only one part: text. No InlineData binary part for a text file.
 	if len(c.Parts) != 1 {
@@ -160,14 +165,14 @@ func TestBuildUserContentInlinesTextAttachments(t *testing.T) {
 
 func TestIsTextMime(t *testing.T) {
 	cases := map[string]bool{
-		"text/plain":             true,
-		"text/markdown":          true,
+		"text/plain":                true,
+		"text/markdown":             true,
 		"text/plain; charset=utf-8": true,
-		"application/json":       true,
-		"application/xml":        true,
-		"image/png":              false,
-		"application/pdf":        false,
-		"application/octet-stream": false,
+		"application/json":          true,
+		"application/xml":           true,
+		"image/png":                 false,
+		"application/pdf":           false,
+		"application/octet-stream":  false,
 	}
 	for in, want := range cases {
 		if got := isTextMime(in); got != want {
@@ -303,7 +308,8 @@ system: s
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	if err := rt.PreflightMCP(ctx, 1*time.Second); err != nil {
+	err = rt.PreflightMCP(ctx, 1*time.Second)
+	if err != nil {
 		t.Fatalf("PreflightMCP with no servers should be a no-op, got: %v", err)
 	}
 }

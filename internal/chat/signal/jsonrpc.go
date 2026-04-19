@@ -119,12 +119,17 @@ func (c *client) read(r io.Reader, notifs chan<- frame) error {
 			continue
 		}
 		var f frame
-		if err := json.Unmarshal(line, &f); err != nil {
+		err := json.Unmarshal(line, &f)
+		if err != nil {
 			return fmt.Errorf("decode frame: %w (raw: %s)", err, string(line))
 		}
 		c.dispatch(f, notifs)
 	}
-	return scanner.Err()
+	err := scanner.Err()
+	if err != nil {
+		return fmt.Errorf("scan signal-cli output: %w", err)
+	}
+	return nil
 }
 
 func (c *client) dispatch(f frame, notifs chan<- frame) {
@@ -139,7 +144,8 @@ func (c *client) dispatch(f frame, notifs chan<- frame) {
 		return
 	}
 	var id int64
-	if err := json.Unmarshal(f.ID, &id); err != nil {
+	err := json.Unmarshal(f.ID, &id)
+	if err != nil {
 		return
 	}
 	c.pendingM.Lock()

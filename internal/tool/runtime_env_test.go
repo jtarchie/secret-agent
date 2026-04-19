@@ -35,10 +35,12 @@ func TestCoerceRuntimeValue(t *testing.T) {
 }
 
 func TestCoerceRuntimeValueRejects(t *testing.T) {
-	if _, err := coerceRuntimeValue("not-a-number", bot.ParamInteger); err == nil {
+	_, err := coerceRuntimeValue("not-a-number", bot.ParamInteger)
+	if err == nil {
 		t.Error("expected error for garbage integer")
 	}
-	if _, err := coerceRuntimeValue(struct{}{}, bot.ParamBoolean); err == nil {
+	_, err = coerceRuntimeValue(struct{}{}, bot.ParamBoolean)
+	if err == nil {
 		t.Error("expected error for non-boolean type")
 	}
 }

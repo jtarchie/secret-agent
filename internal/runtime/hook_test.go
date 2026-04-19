@@ -26,7 +26,8 @@ func (stubLLM) GenerateContent(_ context.Context, _ *adkmodel.LLMRequest, _ bool
 func writeBot(t *testing.T, body string) *bot.Bot {
 	t.Helper()
 	p := filepath.Join(t.TempDir(), "bot.yml")
-	if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+	err := os.WriteFile(p, []byte(body), 0o600)
+	if err != nil {
 		t.Fatalf("write: %v", err)
 	}
 	b, err := bot.Load(p)
@@ -63,7 +64,8 @@ hooks:
   - on: after_agent
     expr: "nil"
 `)
-	if _, err := (&builder{}).buildAgent(b.Name, "test", b, stubLLM{}, true); err != nil {
+	_, err := (&builder{}).buildAgent(b.Name, "test", b, stubLLM{}, true)
+	if err != nil {
 		t.Fatalf("buildAgent: %v", err)
 	}
 }
@@ -76,7 +78,8 @@ tools:
   - name: greet
     sh: echo hi
 `)
-	if _, err := (&builder{}).buildAgent(b.Name, "test", b, stubLLM{}, true); err != nil {
+	_, err := (&builder{}).buildAgent(b.Name, "test", b, stubLLM{}, true)
+	if err != nil {
 		t.Fatalf("buildAgent: %v", err)
 	}
 }
@@ -85,20 +88,22 @@ func TestBuildAgentRejectsBadHookScript(t *testing.T) {
 	// Compilation error inside the hook script should surface from
 	// buildAgent, not later at runtime.
 	p := filepath.Join(t.TempDir(), "bot.yml")
-	if err := os.WriteFile(p, []byte(`
+	err := os.WriteFile(p, []byte(`
 name: b
 system: s
 hooks:
   - on: before_model
     expr: "((("
-`), 0o600); err != nil {
+`), 0o600)
+	if err != nil {
 		t.Fatalf("write: %v", err)
 	}
 	b, err := bot.Load(p)
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
-	if _, err := (&builder{}).buildAgent(b.Name, "test", b, stubLLM{}, true); err == nil {
+	_, err = (&builder{}).buildAgent(b.Name, "test", b, stubLLM{}, true)
+	if err == nil {
 		t.Fatal("expected buildAgent to fail on bad hook expr")
 	}
 }

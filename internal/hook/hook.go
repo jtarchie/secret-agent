@@ -9,6 +9,7 @@ package hook
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/jtarchie/secret-agent/internal/bot"
@@ -52,5 +53,5 @@ func compileOne(h bot.Hook) (func(context.Context, map[string]any) (any, error),
 	case h.Js != "":
 		return compileJs(h.Js)
 	}
-	return nil, fmt.Errorf("no runtime (sh/expr/js) set")
+	return nil, errors.New("no runtime (sh/expr/js) set")
 }

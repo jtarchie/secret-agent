@@ -24,7 +24,8 @@ func TestParseAttachmentsNoToken(t *testing.T) {
 func TestParseAttachmentsUnquoted(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "hello.txt")
-	if err := os.WriteFile(path, []byte("hi"), 0o600); err != nil {
+	err := os.WriteFile(path, []byte("hi"), 0o600)
+	if err != nil {
 		t.Fatalf("write: %v", err)
 	}
 
@@ -51,7 +52,8 @@ func TestParseAttachmentsUnquoted(t *testing.T) {
 func TestParseAttachmentsQuotedWithSpaces(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "my photo.jpg")
-	if err := os.WriteFile(path, []byte("x"), 0o600); err != nil {
+	err := os.WriteFile(path, []byte("x"), 0o600)
+	if err != nil {
 		t.Fatalf("write: %v", err)
 	}
 
@@ -90,7 +92,8 @@ func TestParseAttachmentsMultiple(t *testing.T) {
 	p1 := filepath.Join(dir, "a.txt")
 	p2 := filepath.Join(dir, "b.txt")
 	for _, p := range []string{p1, p2} {
-		if err := os.WriteFile(p, []byte("x"), 0o600); err != nil {
+		err := os.WriteFile(p, []byte("x"), 0o600)
+		if err != nil {
 			t.Fatalf("write: %v", err)
 		}
 	}

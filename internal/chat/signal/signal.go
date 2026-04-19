@@ -3,6 +3,7 @@ package signal
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -70,10 +71,10 @@ func New(account, stateDir string, opts ...Option) *Transport {
 // Returns when the context is canceled or signal-cli exits.
 func (t *Transport) Run(ctx context.Context, dispatcher chat.Dispatcher) error {
 	if t.account == "" {
-		return fmt.Errorf("signal transport: account is required")
+		return errors.New("signal transport: account is required")
 	}
 	if t.stateDir == "" {
-		return fmt.Errorf("signal transport: stateDir is required")
+		return errors.New("signal transport: stateDir is required")
 	}
 
 	log := t.logger.With("component", "signal", "account", t.account)
@@ -90,9 +91,9 @@ func (t *Transport) Run(ctx context.Context, dispatcher chat.Dispatcher) error {
 	if err != nil {
 		return err
 	}
-	defer proc.close()
+	defer func() { _ = proc.close() }()
 
-	go proc.forwardStderr(log)
+	go proc.forwardStderr(ctx, log)
 
 	cli := newClient(proc.stdin)
 	notifs := make(chan frame, 64)
@@ -120,18 +121,18 @@ func (t *Transport) Run(ctx context.Context, dispatcher chat.Dispatcher) error {
 		select {
 		case <-ctx.Done():
 			log.Info("shutdown", "reason", "context canceled", "err", ctx.Err())
-			return ctx.Err()
+			return fmt.Errorf("signal transport: %w", ctx.Err())
 		case err := <-readDone:
 			if err != nil {
 				log.Error("signal-cli reader failed", "err", err)
 				return fmt.Errorf("signal-cli reader: %w", err)
 			}
 			log.Warn("signal-cli stdout closed")
-			return fmt.Errorf("signal-cli exited")
+			return errors.New("signal-cli exited")
 		case f, ok := <-notifs:
 			if !ok {
 				log.Warn("notification channel closed")
-				return fmt.Errorf("signal-cli closed")
+				return errors.New("signal-cli closed")
 			}
 			if f.Method != "receive" {
 				log.Debug("ignoring non-receive notification", "method", f.Method)
@@ -160,7 +161,8 @@ func (t *Transport) dispatchReceive(
 	f frame,
 ) {
 	var rp receiveParams
-	if err := json.Unmarshal(f.Params, &rp); err != nil {
+	err := json.Unmarshal(f.Params, &rp)
+	if err != nil {
 		log.Warn("decode receive params failed", "err", err)
 		return
 	}
@@ -342,7 +344,7 @@ func (t *Transport) handleDM(
 
 	if replyErr != nil {
 		peerLog.Error("handler: failed", "err", replyErr, "duration", dur)
-		body = fmt.Sprintf("error: %s", replyErr.Error())
+		body = "error: " + replyErr.Error()
 	} else if body == "" {
 		peerLog.Debug("handler: empty reply — nothing to send", "duration", dur)
 		return
@@ -373,7 +375,8 @@ func (t *Transport) handleDM(
 	}
 
 	sendStart := time.Now()
-	if _, err := cli.call("send", params); err != nil {
+	_, err := cli.call("send", params)
+	if err != nil {
 		peerLog.Error("send failed", "err", err, "duration", time.Since(sendStart))
 		return
 	}

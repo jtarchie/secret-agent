@@ -28,7 +28,7 @@ func NewExpr(name, description, code string, params map[string]bot.Param) (adkto
 		return nil, fmt.Errorf("build schema: %w", err)
 	}
 
-	return functiontool.New(
+	tool, err := functiontool.New(
 		functiontool.Config{
 			Name:        name,
 			Description: description,
@@ -52,10 +52,18 @@ func NewExpr(name, description, code string, params map[string]bot.Param) (adkto
 			return shellResult{Output: string(b)}, nil
 		},
 	)
+	if err != nil {
+		return nil, fmt.Errorf("new expr tool: %w", err)
+	}
+	return tool, nil
 }
 
 func runExpr(program *vm.Program, env map[string]any) (any, error) {
-	return expr.Run(program, env)
+	v, err := expr.Run(program, env)
+	if err != nil {
+		return nil, fmt.Errorf("expr run: %w", err)
+	}
+	return v, nil
 }
 
 // buildRuntimeEnv maps LLM-supplied args to variable bindings for expr/js

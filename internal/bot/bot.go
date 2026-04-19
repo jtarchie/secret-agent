@@ -2,6 +2,7 @@
 package bot
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -227,11 +228,14 @@ func (p *Param) UnmarshalYAML(node *yaml.Node) error {
 	case yaml.MappingNode:
 		type raw Param
 		var r raw
-		if err := node.Decode(&r); err != nil {
-			return err
+		err := node.Decode(&r)
+		if err != nil {
+			return fmt.Errorf("decode param: %w", err)
 		}
 		*p = Param(r)
 		return nil
+	case yaml.DocumentNode, yaml.SequenceNode, yaml.AliasNode:
+		return fmt.Errorf("param must be a scalar shorthand or a mapping, got %v", node.Kind)
 	default:
 		return fmt.Errorf("param must be a scalar shorthand or a mapping, got %v", node.Kind)
 	}
@@ -262,13 +266,25 @@ func coerceScalar(s string, t ParamType) (any, error) {
 	case ParamString:
 		return s, nil
 	case ParamInteger:
-		return strconv.ParseInt(s, 10, 64)
+		v, err := strconv.ParseInt(s, 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("parse integer: %w", err)
+		}
+		return v, nil
 	case ParamNumber:
-		return strconv.ParseFloat(s, 64)
+		v, err := strconv.ParseFloat(s, 64)
+		if err != nil {
+			return nil, fmt.Errorf("parse number: %w", err)
+		}
+		return v, nil
 	case ParamBoolean:
-		return strconv.ParseBool(s)
+		v, err := strconv.ParseBool(s)
+		if err != nil {
+			return nil, fmt.Errorf("parse boolean: %w", err)
+		}
+		return v, nil
 	case ParamAttachment:
-		return nil, fmt.Errorf("attachment params cannot have a default")
+		return nil, errors.New("attachment params cannot have a default")
 	}
 	return nil, fmt.Errorf("unknown type %q", t)
 }
@@ -334,7 +350,7 @@ func normalizeToolHook(h *Hook) error {
 	h.Js = strings.TrimSpace(h.Js)
 
 	if h.Tool != "" {
-		return fmt.Errorf("`tool:` filter is only valid on bot-level hooks")
+		return errors.New("`tool:` filter is only valid on bot-level hooks")
 	}
 
 	switch h.On {
@@ -343,7 +359,9 @@ func normalizeToolHook(h *Hook) error {
 	case "after", HookAfterTool:
 		h.On = HookAfterTool
 	case "":
-		return fmt.Errorf("`on:` is required (before|after)")
+		return errors.New("`on:` is required (before|after)")
+	case HookBeforeModel, HookAfterModel, HookBeforeAgent, HookAfterAgent:
+		return fmt.Errorf("`on: %s` is not valid on a tool-scoped hook (want before|after)", h.On)
 	default:
 		return fmt.Errorf("`on: %s` is not valid on a tool-scoped hook (want before|after)", h.On)
 	}
@@ -360,7 +378,7 @@ func normalizeBotHook(h *Hook, toolNames map[string]struct{}) error {
 	h.Tool = strings.TrimSpace(h.Tool)
 
 	if h.On == "" {
-		return fmt.Errorf("`on:` is required")
+		return errors.New("`on:` is required")
 	}
 	if _, ok := allowedBotHookEvents[h.On]; !ok {
 		return fmt.Errorf("`on: %s` is not a valid event", h.On)
@@ -387,7 +405,7 @@ func normalizeMCPServer(m *MCPServer) error {
 	m.URL = strings.TrimSpace(m.URL)
 
 	if m.Name == "" {
-		return fmt.Errorf("name is required")
+		return errors.New("name is required")
 	}
 	if !paramNameRe.MatchString(m.Name) {
 		return fmt.Errorf("name %q must match [A-Za-z_][A-Za-z0-9_]*", m.Name)
@@ -426,7 +444,7 @@ func validateHookBody(h *Hook) error {
 	}
 	switch len(set) {
 	case 0:
-		return fmt.Errorf("exactly one of sh, expr, js is required")
+		return errors.New("exactly one of sh, expr, js is required")
 	case 1:
 		return nil
 	default:
@@ -438,6 +456,7 @@ func Load(path string) (*Bot, error) {
 	return loadBot(path, map[string]bool{}, 0)
 }
 
+//nolint:gocognit,cyclop // YAML normalize + validate is inherently long; splitting fragments spec-close field checks
 func loadBot(path string, visited map[string]bool, depth int) (*Bot, error) {
 	abs, err := filepath.Abs(path)
 	if err != nil {
@@ -458,7 +477,8 @@ func loadBot(path string, visited map[string]bool, depth int) (*Bot, error) {
 	}
 
 	var b Bot
-	if err := yaml.Unmarshal(data, &b); err != nil {
+	err = yaml.Unmarshal(data, &b)
+	if err != nil {
 		return nil, fmt.Errorf("parse %s: %w", path, err)
 	}
 
@@ -601,13 +621,15 @@ func loadBot(path string, visited map[string]bool, depth int) (*Bot, error) {
 			return nil, fmt.Errorf("%s: tool %q: only one of sh, expr, js may be set (got %s)", path, t.Name, strings.Join(set, ", "))
 		}
 		for name, p := range t.Params {
-			if err := p.validate(t.Name, name); err != nil {
+			err := p.validate(t.Name, name)
+			if err != nil {
 				return nil, fmt.Errorf("%s: %w", path, err)
 			}
 		}
 		for j := range t.Hooks {
 			h := &t.Hooks[j]
-			if err := normalizeToolHook(h); err != nil {
+			err := normalizeToolHook(h)
+			if err != nil {
 				return nil, fmt.Errorf("%s: tool %q hook[%d]: %w", path, t.Name, j, err)
 			}
 		}
@@ -620,7 +642,8 @@ func loadBot(path string, visited map[string]bool, depth int) (*Bot, error) {
 
 	for i := range b.MCP {
 		m := &b.MCP[i]
-		if err := normalizeMCPServer(m); err != nil {
+		err := normalizeMCPServer(m)
+		if err != nil {
 			return nil, fmt.Errorf("%s: mcp[%d]: %w", path, i, err)
 		}
 		if _, clash := toolNames[m.Name]; clash {
@@ -631,7 +654,8 @@ func loadBot(path string, visited map[string]bool, depth int) (*Bot, error) {
 
 	for i := range b.Hooks {
 		h := &b.Hooks[i]
-		if err := normalizeBotHook(h, toolNames); err != nil {
+		err := normalizeBotHook(h, toolNames)
+		if err != nil {
 			return nil, fmt.Errorf("%s: hooks[%d]: %w", path, i, err)
 		}
 	}
@@ -658,7 +682,8 @@ func loadBot(path string, visited map[string]bool, depth int) (*Bot, error) {
 			tc.Expect.ToolCalls[j] = etc
 		}
 		if om := tc.Expect.FinalOutput; om != nil && om.Regex != "" {
-			if _, err := regexp.Compile(om.Regex); err != nil {
+			_, err := regexp.Compile(om.Regex)
+			if err != nil {
 				return nil, fmt.Errorf("%s: test %q: expect.final_output.regex: %w", path, tc.Name, err)
 			}
 		}

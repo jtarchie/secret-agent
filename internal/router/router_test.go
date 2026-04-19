@@ -2,7 +2,6 @@ package router
 
 import (
 	"context"
-	"io"
 	"log/slog"
 	"strings"
 	"sync"
@@ -13,17 +12,17 @@ import (
 )
 
 func nullLogger() *slog.Logger {
-	return slog.New(slog.NewTextHandler(io.Discard, nil))
+	return slog.New(slog.DiscardHandler)
 }
 
 // recordingHandler captures the last message it received so assertions can
 // inspect what the router forwarded to a bot.
 type recordingHandler struct {
-	mu         sync.Mutex
-	lastConv   string
-	lastMsg    chat.Message
-	calls      int
-	replyText  string
+	mu        sync.Mutex
+	lastConv  string
+	lastMsg   chat.Message
+	calls     int
+	replyText string
 }
 
 func (r *recordingHandler) factory() HandlerFactory {

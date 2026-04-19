@@ -10,7 +10,8 @@ import (
 func writeBot(t *testing.T, yaml string) string {
 	t.Helper()
 	p := filepath.Join(t.TempDir(), "bot.yml")
-	if err := os.WriteFile(p, []byte(yaml), 0o600); err != nil {
+	err := os.WriteFile(p, []byte(yaml), 0o600)
+	if err != nil {
 		t.Fatalf("write: %v", err)
 	}
 	return p
@@ -87,7 +88,8 @@ tools:
 func writeFile(t *testing.T, dir, name, body string) string {
 	t.Helper()
 	p := filepath.Join(dir, name)
-	if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+	err := os.WriteFile(p, []byte(body), 0o600)
+	if err != nil {
 		t.Fatalf("write %s: %v", name, err)
 	}
 	return p
@@ -225,25 +227,27 @@ func TestLoadAgentsCycle(t *testing.T) {
 	dir := t.TempDir()
 	a := filepath.Join(dir, "a.yml")
 	b := filepath.Join(dir, "b.yml")
-	if err := os.WriteFile(a, []byte(`
+	err := os.WriteFile(a, []byte(`
 name: a
 system: s
 agents:
   bb:
     file: ./b.yml
-`), 0o600); err != nil {
+`), 0o600)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(b, []byte(`
+	err = os.WriteFile(b, []byte(`
 name: b
 system: s
 agents:
   aa:
     file: ./a.yml
-`), 0o600); err != nil {
+`), 0o600)
+	if err != nil {
 		t.Fatal(err)
 	}
-	_, err := Load(a)
+	_, err = Load(a)
 	if err == nil {
 		t.Fatal("expected cycle error")
 	}

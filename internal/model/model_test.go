@@ -21,7 +21,8 @@ func TestPreflightOpenAIOK(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	if err := Preflight(context.Background(), "openai", "sk-test", srv.URL); err != nil {
+	err := Preflight(context.Background(), "openai", "sk-test", srv.URL)
+	if err != nil {
 		t.Fatalf("Preflight: %v", err)
 	}
 	if gotAuth != "Bearer sk-test" {
@@ -42,7 +43,8 @@ func TestPreflightAnthropicOK(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	if err := Preflight(context.Background(), "anthropic", "key-123", srv.URL); err != nil {
+	err := Preflight(context.Background(), "anthropic", "key-123", srv.URL)
+	if err != nil {
 		t.Fatalf("Preflight: %v", err)
 	}
 	if gotKey != "key-123" {

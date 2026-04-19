@@ -1,6 +1,7 @@
 package tool
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
@@ -12,6 +13,7 @@ import (
 	"google.golang.org/adk/session"
 	adktool "google.golang.org/adk/tool"
 	"google.golang.org/adk/tool/functiontool"
+	"google.golang.org/genai"
 
 	"github.com/jtarchie/secret-agent/internal/chat"
 )
@@ -52,103 +54,128 @@ func NewSubAgent(name, description string, child agent.Agent, skipSummarization,
 		Required:   []string{"request"},
 	}
 
-	return functiontool.New(
+	tool, err := functiontool.New(
 		functiontool.Config{
 			Name:        name,
 			Description: description,
 			InputSchema: schema,
 		},
 		func(ctx adktool.Context, args map[string]any) (SubAgentResult, error) {
-			request, _ := args["request"].(string)
-			request = strings.TrimSpace(request)
-			if request == "" {
-				return SubAgentResult{}, fmt.Errorf("request is required")
-			}
-
-			var forwarded []chat.Attachment
-			if forwardAttachments {
-				refs, _ := args["attachments"].([]any)
-				if len(refs) > 0 {
-					parentAtts := AttachmentsFromContext(ctx)
-					for _, raw := range refs {
-						ref := fmt.Sprintf("%v", raw)
-						path, err := resolveAttachment(ref, parentAtts)
-						if err != nil {
-							return SubAgentResult{}, fmt.Errorf("attachment %q: %w", ref, err)
-						}
-						for _, a := range parentAtts {
-							if a.Path == path {
-								forwarded = append(forwarded, a)
-								break
-							}
-						}
-					}
-				}
-			}
-
-			content, err := BuildAttachedContent(request, forwarded)
-			if err != nil {
-				return SubAgentResult{}, fmt.Errorf("build sub-agent content: %w", err)
-			}
-
-			if skipSummarization {
-				if actions := ctx.Actions(); actions != nil {
-					actions.SkipSummarization = true
-				}
-			}
-
-			sessionService := session.InMemoryService()
-			r, err := runner.New(runner.Config{
-				AppName:         child.Name(),
-				Agent:           child,
-				SessionService:  sessionService,
-				ArtifactService: artifact.InMemoryService(),
-				MemoryService:   memory.InMemoryService(),
-			})
-			if err != nil {
-				return SubAgentResult{}, fmt.Errorf("create sub-agent runner: %w", err)
-			}
-
-			userID := ctx.UserID()
-			if userID == "" {
-				userID = "sub-agent"
-			}
-			subSession, err := sessionService.Create(ctx, &session.CreateRequest{
-				AppName: child.Name(),
-				UserID:  userID,
-			})
-			if err != nil {
-				return SubAgentResult{}, fmt.Errorf("create sub-agent session: %w", err)
-			}
-
-			runCtx := WithAttachments(ctx, forwarded)
-
-			var lastEvent *session.Event
-			for event, err := range r.Run(runCtx, subSession.Session.UserID(), subSession.Session.ID(), content, agent.RunConfig{
-				StreamingMode: agent.StreamingModeSSE,
-			}) {
-				if err != nil {
-					return SubAgentResult{}, fmt.Errorf("sub-agent %q: %w", child.Name(), err)
-				}
-				if event.ErrorCode != "" || event.ErrorMessage != "" {
-					return SubAgentResult{}, fmt.Errorf("sub-agent %q: %s: %s", child.Name(), event.ErrorCode, event.ErrorMessage)
-				}
-				if event.LLMResponse.Content != nil {
-					lastEvent = event
-				}
-			}
-
-			if lastEvent == nil {
-				return SubAgentResult{}, nil
-			}
-
-			var textParts []string
-			for _, part := range lastEvent.LLMResponse.Content.Parts {
-				if part != nil && part.Text != "" {
-					textParts = append(textParts, part.Text)
-				}
-			}
-			return SubAgentResult{Result: strings.Join(textParts, "\n")}, nil
+			return runSubAgent(ctx, args, child, skipSummarization, forwardAttachments)
 		},
 	)
+	if err != nil {
+		return nil, fmt.Errorf("new sub-agent tool: %w", err)
+	}
+	return tool, nil
+}
+
+func runSubAgent(ctx adktool.Context, args map[string]any, child agent.Agent, skipSummarization, forwardAttachments bool) (SubAgentResult, error) {
+	request, _ := args["request"].(string)
+	request = strings.TrimSpace(request)
+	if request == "" {
+		return SubAgentResult{}, errors.New("request is required")
+	}
+
+	forwarded, err := resolveForwardedAttachments(ctx, args, forwardAttachments)
+	if err != nil {
+		return SubAgentResult{}, err
+	}
+
+	content, err := BuildAttachedContent(request, forwarded)
+	if err != nil {
+		return SubAgentResult{}, fmt.Errorf("build sub-agent content: %w", err)
+	}
+
+	if skipSummarization {
+		if actions := ctx.Actions(); actions != nil {
+			actions.SkipSummarization = true
+		}
+	}
+
+	lastEvent, err := runChildAgent(ctx, child, content, forwarded)
+	if err != nil {
+		return SubAgentResult{}, err
+	}
+	if lastEvent == nil {
+		return SubAgentResult{}, nil
+	}
+
+	var textParts []string
+	for _, part := range lastEvent.Content.Parts {
+		if part != nil && part.Text != "" {
+			textParts = append(textParts, part.Text)
+		}
+	}
+	return SubAgentResult{Result: strings.Join(textParts, "\n")}, nil
+}
+
+func resolveForwardedAttachments(ctx adktool.Context, args map[string]any, forwardAttachments bool) ([]chat.Attachment, error) {
+	if !forwardAttachments {
+		return nil, nil
+	}
+	refs, _ := args["attachments"].([]any)
+	if len(refs) == 0 {
+		return nil, nil
+	}
+	parentAtts := AttachmentsFromContext(ctx)
+	var forwarded []chat.Attachment
+	for _, raw := range refs {
+		ref := fmt.Sprintf("%v", raw)
+		path, err := resolveAttachment(ref, parentAtts)
+		if err != nil {
+			return nil, fmt.Errorf("attachment %q: %w", ref, err)
+		}
+		for _, a := range parentAtts {
+			if a.Path == path {
+				forwarded = append(forwarded, a)
+				break
+			}
+		}
+	}
+	return forwarded, nil
+}
+
+func runChildAgent(ctx adktool.Context, child agent.Agent, content *genai.Content, forwarded []chat.Attachment) (*session.Event, error) {
+	sessionService := session.InMemoryService()
+	r, err := runner.New(runner.Config{
+		AppName:         child.Name(),
+		Agent:           child,
+		SessionService:  sessionService,
+		ArtifactService: artifact.InMemoryService(),
+		MemoryService:   memory.InMemoryService(),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("create sub-agent runner: %w", err)
+	}
+
+	userID := ctx.UserID()
+	if userID == "" {
+		userID = "sub-agent"
+	}
+	subSession, err := sessionService.Create(ctx, &session.CreateRequest{
+		AppName: child.Name(),
+		UserID:  userID,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("create sub-agent session: %w", err)
+	}
+
+	runCtx := WithAttachments(ctx, forwarded)
+
+	var lastEvent *session.Event
+	for event, err := range r.Run(runCtx, subSession.Session.UserID(), subSession.Session.ID(), content, agent.RunConfig{
+		StreamingMode: agent.StreamingModeSSE,
+	}) {
+		if err != nil {
+			return nil, fmt.Errorf("sub-agent %q: %w", child.Name(), err)
+		}
+		if event.ErrorCode != "" || event.ErrorMessage != "" {
+			return nil, fmt.Errorf("sub-agent %q: %s: %s", child.Name(), event.ErrorCode, event.ErrorMessage)
+		}
+		if event.Content != nil {
+			lastEvent = event
+		}
+	}
+	return lastEvent, nil
 }

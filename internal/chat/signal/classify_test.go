@@ -1,14 +1,13 @@
 package signal
 
 import (
-	"io"
 	"log/slog"
 	"testing"
 	"time"
 )
 
 func nullLogger() *slog.Logger {
-	return slog.New(slog.NewTextHandler(io.Discard, nil))
+	return slog.New(slog.DiscardHandler)
 }
 
 func TestClassify_PlainDM(t *testing.T) {

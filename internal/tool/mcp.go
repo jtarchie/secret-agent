@@ -47,13 +47,13 @@ func NewMCP(m bot.MCPServer) (adktool.Toolset, error) {
 		Transport:           transport,
 		RequireConfirmation: m.RequireConfirmation,
 	}
-	if len(m.ToolFilter) > 0 {
-		cfg.ToolFilter = adktool.AllowedToolsPredicate(m.ToolFilter)
-	}
 
 	ts, err := mcptoolset.New(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("mcp %q: %w", m.Name, err)
+	}
+	if len(m.ToolFilter) > 0 {
+		ts = adktool.FilterToolset(ts, adktool.AllowedToolsPredicate(m.ToolFilter))
 	}
 	return ts, nil
 }
@@ -91,7 +91,10 @@ type headerRoundTripper struct {
 // successful probe warms up the first real chat turn.
 func PreflightMCP(ctx context.Context, ts adktool.Toolset) error {
 	_, err := ts.Tools(preflightCtx{Context: ctx})
-	return err
+	if err != nil {
+		return fmt.Errorf("mcp tools: %w", err)
+	}
+	return nil
 }
 
 // preflightCtx is the minimal agent.ReadonlyContext needed to satisfy
@@ -99,19 +102,19 @@ func PreflightMCP(ctx context.Context, ts adktool.Toolset) error {
 // meaningful — the remaining fields return zero values because mcptoolset
 // only uses the context for cancellation/timeout propagation.
 type preflightCtx struct {
-	context.Context
+	context.Context //nolint:containedctx // ADK's ReadonlyContext interface embeds context; this is the only legal shape
 }
 
 var _ agent.ReadonlyContext = preflightCtx{}
 
-func (preflightCtx) UserContent() *genai.Content       { return nil }
-func (preflightCtx) InvocationID() string              { return "" }
-func (preflightCtx) AgentName() string                 { return "" }
+func (preflightCtx) UserContent() *genai.Content          { return nil }
+func (preflightCtx) InvocationID() string                 { return "" }
+func (preflightCtx) AgentName() string                    { return "" }
 func (preflightCtx) ReadonlyState() session.ReadonlyState { return emptyState{} }
-func (preflightCtx) UserID() string                    { return "" }
-func (preflightCtx) AppName() string                   { return "" }
-func (preflightCtx) SessionID() string                 { return "" }
-func (preflightCtx) Branch() string                    { return "" }
+func (preflightCtx) UserID() string                       { return "" }
+func (preflightCtx) AppName() string                      { return "" }
+func (preflightCtx) SessionID() string                    { return "" }
+func (preflightCtx) Branch() string                       { return "" }
 
 type emptyState struct{}
 
@@ -127,5 +130,9 @@ func (h *headerRoundTripper) RoundTrip(req *http.Request) (*http.Response, error
 			req.Header.Set(k, v)
 		}
 	}
-	return h.base.RoundTrip(req)
+	resp, err := h.base.RoundTrip(req)
+	if err != nil {
+		return nil, fmt.Errorf("round trip: %w", err)
+	}
+	return resp, nil
 }

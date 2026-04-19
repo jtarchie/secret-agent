@@ -19,7 +19,7 @@ type triggerMatcher struct {
 
 func newTriggerMatcher(words []string) (*triggerMatcher, error) {
 	if len(words) == 0 {
-		return nil, nil
+		return &triggerMatcher{}, nil
 	}
 	out := make([]*regexp.Regexp, 0, len(words))
 	for _, w := range words {
@@ -35,9 +35,6 @@ func newTriggerMatcher(words []string) (*triggerMatcher, error) {
 			return nil, fmt.Errorf("compile trigger %q: %w", w, err)
 		}
 		out = append(out, re)
-	}
-	if len(out) == 0 {
-		return nil, nil
 	}
 	return &triggerMatcher{res: out}, nil
 }

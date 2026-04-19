@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -46,7 +47,8 @@ examples:
 `
 
 func main() {
-	if err := run(os.Args[1:]); err != nil {
+	err := run(os.Args[1:])
+	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
 	}
@@ -55,7 +57,7 @@ func main() {
 func run(args []string) error {
 	if len(args) < 1 {
 		fmt.Fprint(os.Stderr, usage)
-		return fmt.Errorf("missing subcommand")
+		return errors.New("missing subcommand")
 	}
 	switch args[0] {
 	case "run":
@@ -70,6 +72,7 @@ func run(args []string) error {
 	}
 }
 
+//nolint:cyclop // the flag-parse → config-load → bot-wire → transport-wire flow is sequential and clearer as one function
 func runRun(args []string) error {
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
@@ -80,24 +83,25 @@ func runRun(args []string) error {
 	skipPreflightFlag := fs.Bool("skip-preflight", false, "skip the startup check that verifies the model endpoint is reachable and the API key is valid")
 	mcpPreflightTimeoutFlag := fs.Duration("mcp-preflight-timeout", 5*time.Second, "per-server timeout for the startup MCP tool-listing probe; 0 disables the deadline")
 	verboseFlag := fs.Int("verbose", 0, "verbosity: 0 info, 1 debug + signal-cli -v, 2 debug + signal-cli -vv, 3 debug + signal-cli -vvv")
-	if err := fs.Parse(args); err != nil {
-		return err
+	err := fs.Parse(args)
+	if err != nil {
+		return fmt.Errorf("parse flags: %w", err)
 	}
 
 	if *modelFlag == "" || *keyFlag == "" || *configFlag == "" {
 		fmt.Fprint(os.Stderr, usage)
-		return fmt.Errorf("--model, --api-key, and --config are required")
+		return errors.New("--model, --api-key, and --config are required")
 	}
 
 	cfg, err := config.Load(*configFlag)
 	if err != nil {
-		return err
+		return fmt.Errorf("load config: %w", err)
 	}
 
 	provider, name := model.SplitModel(*modelFlag)
 	llm, err := model.Resolve(provider, name, *keyFlag, *baseURLFlag)
 	if err != nil {
-		return err
+		return fmt.Errorf("resolve model: %w", err)
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -122,27 +126,28 @@ func runRun(args []string) error {
 		}
 		b, err := bot.Load(p)
 		if err != nil {
-			return err
+			return fmt.Errorf("load bot %s: %w", p, err)
 		}
 		rt, err := runtime.New(ctx, b, llm)
 		if err != nil {
 			return fmt.Errorf("runtime for bot %q: %w", b.Name, err)
 		}
 		if !*skipPreflightFlag {
-			if err := rt.PreflightMCP(ctx, *mcpPreflightTimeoutFlag); err != nil {
+			err := rt.PreflightMCP(ctx, *mcpPreflightTimeoutFlag)
+			if err != nil {
 				return fmt.Errorf("mcp preflight failed for bot %q (use --skip-preflight to bypass): %w", b.Name, err)
 			}
 		}
 		route, err := router.RouteFromBot(b, rt.HandlerFor)
 		if err != nil {
-			return err
+			return fmt.Errorf("route bot %q: %w", b.Name, err)
 		}
 		routes = append(routes, route)
 	}
 
 	rtr, err := router.New(routes, router.WithLogger(logger))
 	if err != nil {
-		return err
+		return fmt.Errorf("build router: %w", err)
 	}
 
 	transports, err := buildTransports(cfg, logger, routes, *verboseFlag)
@@ -155,8 +160,9 @@ func runRun(args []string) error {
 		tp := tp
 		g.Go(func() error { return tp.Run(gctx, rtr) })
 	}
-	if err := g.Wait(); err != nil && err != context.Canceled {
-		return err
+	err = g.Wait()
+	if err != nil && !errors.Is(err, context.Canceled) {
+		return fmt.Errorf("transports: %w", err)
 	}
 	return nil
 }
@@ -197,6 +203,7 @@ func buildTransports(cfg *config.Config, logger *slog.Logger, routes []router.Ro
 	return out, nil
 }
 
+//nolint:cyclop // flag parsing + eval result reporting is sequential and clearer as one function
 func runEval(args []string) error {
 	fs := flag.NewFlagSet("eval", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
@@ -205,19 +212,20 @@ func runEval(args []string) error {
 	baseURLFlag := fs.String("base-url", "", "override the provider's base URL")
 	skipPreflightFlag := fs.Bool("skip-preflight", false, "skip the startup check that verifies the model endpoint is reachable and the API key is valid")
 	verboseFlag := fs.Bool("verbose", false, "print observed tool-call trajectory and final text for each case")
-	if err := fs.Parse(args); err != nil {
-		return err
+	err := fs.Parse(args)
+	if err != nil {
+		return fmt.Errorf("parse flags: %w", err)
 	}
 
 	if *modelFlag == "" || *keyFlag == "" || fs.NArg() != 1 {
 		fmt.Fprint(os.Stderr, usage)
-		return fmt.Errorf("--model, --api-key, and a bot YAML path are all required")
+		return errors.New("--model, --api-key, and a bot YAML path are all required")
 	}
 
 	path := fs.Arg(0)
 	b, err := bot.Load(path)
 	if err != nil {
-		return err
+		return fmt.Errorf("load bot: %w", err)
 	}
 	if len(b.Tests) == 0 {
 		return fmt.Errorf("%s: no `tests:` block declared", path)
@@ -226,7 +234,7 @@ func runEval(args []string) error {
 	provider, name := model.SplitModel(*modelFlag)
 	llm, err := model.Resolve(provider, name, *keyFlag, *baseURLFlag)
 	if err != nil {
-		return err
+		return fmt.Errorf("resolve model: %w", err)
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -243,7 +251,7 @@ func runEval(args []string) error {
 
 	results, err := eval.RunAll(ctx, b, llm)
 	if err != nil {
-		return err
+		return fmt.Errorf("run eval: %w", err)
 	}
 
 	passed, failed := 0, 0
@@ -287,14 +295,16 @@ func runSignalLink(args []string) error {
 	cmdFlag := fs.String("signal-cli", "signal-cli", "path to the signal-cli binary")
 	noQRFlag := fs.Bool("no-qr", false, "do not render a QR code in the terminal; only print the linking URI")
 	verboseFlag := fs.Int("verbose", 0, "verbosity: 0 info, 1 debug")
-	if err := fs.Parse(args); err != nil {
-		return err
+	err := fs.Parse(args)
+	if err != nil {
+		return fmt.Errorf("parse flags: %w", err)
 	}
 	if *stateDirFlag == "" {
 		fmt.Fprint(os.Stderr, usage)
-		return fmt.Errorf("--signal-state-dir is required")
+		return errors.New("--signal-state-dir is required")
 	}
-	if err := os.MkdirAll(*stateDirFlag, 0o700); err != nil {
+	err = os.MkdirAll(*stateDirFlag, 0o700)
+	if err != nil {
 		return fmt.Errorf("create state dir: %w", err)
 	}
 
@@ -314,7 +324,7 @@ func runSignalLink(args []string) error {
 		Logger:     newLogger(*verboseFlag),
 	})
 	if err != nil {
-		return err
+		return fmt.Errorf("signal link: %w", err)
 	}
 	fmt.Fprintf(os.Stderr, "linked account: %s\n", number)
 	return nil

@@ -56,7 +56,8 @@ func spawn(ctx context.Context, command, stateDir, account string, extraArgs ...
 		return nil, fmt.Errorf("stderr pipe: %w", err)
 	}
 
-	if err := cmd.Start(); err != nil {
+	err = cmd.Start()
+	if err != nil {
 		return nil, fmt.Errorf("start %s: %w", command, err)
 	}
 
@@ -78,7 +79,7 @@ var signalCliLogRe = regexp.MustCompile(`^\S+\s+\[.+?\]\s+(TRACE|DEBUG|INFO|WARN
 
 // forwardStderr drains the subprocess's stderr into slog at a level
 // parsed from each line's prefix. Unrecognized lines are emitted at Info.
-func (p *process) forwardStderr(logger *slog.Logger) {
+func (p *process) forwardStderr(ctx context.Context, logger *slog.Logger) {
 	scanner := bufio.NewScanner(p.stderr)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	for scanner.Scan() {
@@ -88,7 +89,7 @@ func (p *process) forwardStderr(logger *slog.Logger) {
 		}
 		if m := signalCliLogRe.FindStringSubmatch(line); m != nil {
 			level := parseLogLevel(m[1])
-			logger.Log(nil, level, "signal-cli", "class", m[2], "msg", m[3])
+			logger.Log(ctx, level, "signal-cli", "class", m[2], "msg", m[3])
 			continue
 		}
 		logger.Info("signal-cli", "raw", line)
@@ -114,5 +115,9 @@ func parseLogLevel(s string) slog.Level {
 // for the process to exit. Caller should have already canceled the context.
 func (p *process) close() error {
 	_ = p.stdin.Close()
-	return p.cmd.Wait()
+	err := p.cmd.Wait()
+	if err != nil {
+		return fmt.Errorf("wait signal-cli: %w", err)
+	}
+	return nil
 }

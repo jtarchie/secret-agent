@@ -10,7 +10,8 @@ import (
 func write(t *testing.T, body string) string {
 	t.Helper()
 	p := filepath.Join(t.TempDir(), "config.yml")
-	if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+	err := os.WriteFile(p, []byte(body), 0o600)
+	if err != nil {
 		t.Fatalf("write: %v", err)
 	}
 	return p

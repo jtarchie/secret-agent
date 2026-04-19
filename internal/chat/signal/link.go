@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -53,9 +54,10 @@ type LinkConfig struct {
 // finishLink tries to .add() to an immutable list in the jsonRpc
 // dispatcher and fails after the account is saved. The `link` subcommand
 // avoids that dispatcher entirely.
+//nolint:gocognit,cyclop // linear spawn → stdout scan → wait → fallback flow reads clearly top-to-bottom
 func Link(ctx context.Context, cfg LinkConfig) (string, error) {
 	if cfg.StateDir == "" {
-		return "", fmt.Errorf("StateDir is required")
+		return "", errors.New("StateDir is required")
 	}
 	if cfg.Command == "" {
 		cfg.Command = "signal-cli"
@@ -92,7 +94,8 @@ func Link(ctx context.Context, cfg LinkConfig) (string, error) {
 		"state_dir", cfg.StateDir,
 		"device_name", cfg.DeviceName,
 	)
-	if err := cmd.Start(); err != nil {
+	err = cmd.Start()
+	if err != nil {
 		return "", fmt.Errorf("start %s: %w", cfg.Command, err)
 	}
 
@@ -105,7 +108,7 @@ func Link(ctx context.Context, cfg LinkConfig) (string, error) {
 				continue
 			}
 			if m := signalCliLogRe.FindStringSubmatch(line); m != nil {
-				log.Log(nil, parseLogLevel(m[1]), "signal-cli", "class", m[2], "msg", m[3])
+				log.Log(ctx, parseLogLevel(m[1]), "signal-cli", "class", m[2], "msg", m[3])
 				continue
 			}
 			log.Info("signal-cli", "raw", line)
@@ -127,7 +130,7 @@ func Link(ctx context.Context, cfg LinkConfig) (string, error) {
 		}
 		if strings.HasPrefix(line, "sgnl://") {
 			log.Info("received linking URI", "uri_bytes", len(line))
-			fmt.Fprintln(cfg.URIOut, line)
+			_, _ = fmt.Fprintln(cfg.URIOut, line)
 			if !cfg.NoQRCode {
 				qrterminal.GenerateWithConfig(line, qrterminal.Config{
 					Level:          qrterminal.L,
@@ -149,7 +152,8 @@ func Link(ctx context.Context, cfg LinkConfig) (string, error) {
 		}
 	}
 
-	if err := cmd.Wait(); err != nil {
+	err = cmd.Wait()
+	if err != nil {
 		log.Error("signal-cli link exited with error", "err", err)
 		return "", fmt.Errorf("signal-cli link: %w", err)
 	}
@@ -178,7 +182,8 @@ func readLatestAccount(stateDir string) (string, error) {
 			Number string `json:"number"`
 		} `json:"accounts"`
 	}
-	if err := json.Unmarshal(raw, &parsed); err != nil {
+	err = json.Unmarshal(raw, &parsed)
+	if err != nil {
 		return "", fmt.Errorf("parse %s: %w", path, err)
 	}
 	if len(parsed.Accounts) == 0 {

@@ -37,7 +37,7 @@ func NewShell(name, description, script string, params map[string]bot.Param) (ad
 		return nil, fmt.Errorf("build schema: %w", err)
 	}
 
-	return functiontool.New(
+	tool, err := functiontool.New(
 		functiontool.Config{
 			Name:        name,
 			Description: description,
@@ -81,12 +81,17 @@ func NewShell(name, description, script string, params map[string]bot.Param) (ad
 			if err != nil {
 				return shellResult{}, fmt.Errorf("%s: %w", name, err)
 			}
-			if err := runner.Run(ctx, file); err != nil {
+			err = runner.Run(ctx, file)
+			if err != nil {
 				return shellResult{}, fmt.Errorf("%s: %w (stderr: %s)", name, err, stderr.String())
 			}
 			return shellResult{Output: stdout.String()}, nil
 		},
 	)
+	if err != nil {
+		return nil, fmt.Errorf("new shell tool: %w", err)
+	}
+	return tool, nil
 }
 
 func buildSchema(params map[string]bot.Param) (*jsonschema.Schema, error) {
@@ -128,61 +133,75 @@ func buildSchema(params map[string]bot.Param) (*jsonschema.Schema, error) {
 // toEnvString coerces an LLM-supplied value into a shell-env string, being
 // lenient about JSON type sloppiness (accepts "2" for an integer param, etc.).
 func toEnvString(v any, t bot.ParamType) (string, error) {
-	switch t {
+	switch t { //nolint:exhaustive // ParamAttachment is resolved before reaching this helper
 	case bot.ParamString:
-		switch x := v.(type) {
-		case string:
-			return x, nil
-		default:
-			return fmt.Sprintf("%v", x), nil
-		}
+		return envFormatString(v), nil
 	case bot.ParamInteger:
-		switch x := v.(type) {
-		case float64:
-			return strconv.FormatInt(int64(x), 10), nil
-		case int:
-			return strconv.Itoa(x), nil
-		case int64:
-			return strconv.FormatInt(x, 10), nil
-		case string:
-			n, err := strconv.ParseInt(x, 10, 64)
-			if err != nil {
-				return "", fmt.Errorf("cannot parse %q as integer", x)
-			}
-			return strconv.FormatInt(n, 10), nil
-		default:
-			return "", fmt.Errorf("expected integer, got %T", v)
-		}
+		return envFormatInteger(v)
 	case bot.ParamNumber:
-		switch x := v.(type) {
-		case float64:
-			return strconv.FormatFloat(x, 'f', -1, 64), nil
-		case int:
-			return strconv.Itoa(x), nil
-		case int64:
-			return strconv.FormatInt(x, 10), nil
-		case string:
-			n, err := strconv.ParseFloat(x, 64)
-			if err != nil {
-				return "", fmt.Errorf("cannot parse %q as number", x)
-			}
-			return strconv.FormatFloat(n, 'f', -1, 64), nil
-		default:
-			return "", fmt.Errorf("expected number, got %T", v)
-		}
+		return envFormatNumber(v)
 	case bot.ParamBoolean:
-		switch x := v.(type) {
-		case bool:
-			return strconv.FormatBool(x), nil
-		case string:
-			b, err := strconv.ParseBool(x)
-			if err != nil {
-				return "", fmt.Errorf("cannot parse %q as boolean", x)
-			}
-			return strconv.FormatBool(b), nil
-		default:
-			return "", fmt.Errorf("expected boolean, got %T", v)
-		}
+		return envFormatBoolean(v)
 	}
 	return "", fmt.Errorf("unknown param type %q", t)
+}
+
+func envFormatString(v any) string {
+	if s, ok := v.(string); ok {
+		return s
+	}
+	return fmt.Sprintf("%v", v)
+}
+
+func envFormatInteger(v any) (string, error) {
+	switch x := v.(type) {
+	case float64:
+		return strconv.FormatInt(int64(x), 10), nil
+	case int:
+		return strconv.Itoa(x), nil
+	case int64:
+		return strconv.FormatInt(x, 10), nil
+	case string:
+		n, err := strconv.ParseInt(x, 10, 64)
+		if err != nil {
+			return "", fmt.Errorf("cannot parse %q as integer", x)
+		}
+		return strconv.FormatInt(n, 10), nil
+	default:
+		return "", fmt.Errorf("expected integer, got %T", v)
+	}
+}
+
+func envFormatNumber(v any) (string, error) {
+	switch x := v.(type) {
+	case float64:
+		return strconv.FormatFloat(x, 'f', -1, 64), nil
+	case int:
+		return strconv.Itoa(x), nil
+	case int64:
+		return strconv.FormatInt(x, 10), nil
+	case string:
+		n, err := strconv.ParseFloat(x, 64)
+		if err != nil {
+			return "", fmt.Errorf("cannot parse %q as number", x)
+		}
+		return strconv.FormatFloat(n, 'f', -1, 64), nil
+	default:
+		return "", fmt.Errorf("expected number, got %T", v)
+	}
+}
+
+func envFormatBoolean(v any) (string, error) {
+	switch x := v.(type) {
+	case bool:
+		return strconv.FormatBool(x), nil
+	case string:
+		b, err := strconv.ParseBool(x)
+		if err != nil {
+			return "", fmt.Errorf("cannot parse %q as boolean", x)
+		}
+		return strconv.FormatBool(b), nil
+	default:
+		return "", fmt.Errorf("expected boolean, got %T", v)
+	}
 }

@@ -3,6 +3,7 @@ package signal
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"strings"
 	"sync"
@@ -39,7 +40,7 @@ func waitPending(c *client, n int) {
 func TestClientRoundtripCall(t *testing.T) {
 	var reqBuf bytes.Buffer
 	pr, pw := io.Pipe()
-	defer pw.Close()
+	defer func() { _ = pw.Close() }()
 
 	c := newClient(&reqBuf)
 	notifs := make(chan frame, 4)
@@ -64,7 +65,8 @@ func TestClientRoundtripCall(t *testing.T) {
 	}()
 
 	waitPending(c, 1)
-	if _, err := pw.Write([]byte(sendResponse)); err != nil {
+	_, err := pw.Write([]byte(sendResponse))
+	if err != nil {
 		t.Fatalf("pipe write: %v", err)
 	}
 
@@ -75,7 +77,8 @@ func TestClientRoundtripCall(t *testing.T) {
 	var decoded struct {
 		Timestamp int64 `json:"timestamp"`
 	}
-	if err := json.Unmarshal(got.raw, &decoded); err != nil {
+	err = json.Unmarshal(got.raw, &decoded)
+	if err != nil {
 		t.Fatalf("decode result: %v", err)
 	}
 	if decoded.Timestamp != 1700000000001 {
@@ -84,7 +87,8 @@ func TestClientRoundtripCall(t *testing.T) {
 
 	// Verify we emitted a well-formed JSON-RPC request.
 	var sent outRequest
-	if err := json.Unmarshal(bytes.TrimSpace(reqBuf.Bytes()), &sent); err != nil {
+	err = json.Unmarshal(bytes.TrimSpace(reqBuf.Bytes()), &sent)
+	if err != nil {
 		t.Fatalf("decode sent: %v; raw=%s", err, reqBuf.String())
 	}
 	if sent.JSONRPC != "2.0" {
@@ -97,8 +101,9 @@ func TestClientRoundtripCall(t *testing.T) {
 		t.Errorf("id = %d, want 1", sent.ID)
 	}
 
-	pw.Close()
-	if err := <-readDone; err != nil && err != io.EOF {
+	_ = pw.Close()
+	err = <-readDone
+	if err != nil && !errors.Is(err, io.EOF) {
 		t.Fatalf("reader err: %v", err)
 	}
 }
@@ -106,11 +111,11 @@ func TestClientRoundtripCall(t *testing.T) {
 func TestClientErrorResponse(t *testing.T) {
 	var reqBuf bytes.Buffer
 	pr, pw := io.Pipe()
-	defer pw.Close()
+	defer func() { _ = pw.Close() }()
 
 	c := newClient(&reqBuf)
 	notifs := make(chan frame, 4)
-	go c.read(pr, notifs)
+	go func() { _ = c.read(pr, notifs) }()
 	go func() {
 		for range notifs {
 		}
@@ -126,7 +131,7 @@ func TestClientErrorResponse(t *testing.T) {
 		r1 <- callResult{err}
 	}()
 	waitPending(c, 1)
-	pw.Write([]byte(sendResponse))
+	_, _ = pw.Write([]byte(sendResponse))
 	if got := <-r1; got.err != nil {
 		t.Fatalf("call 1: %v", got.err)
 	}
@@ -137,7 +142,7 @@ func TestClientErrorResponse(t *testing.T) {
 		r2 <- callResult{err}
 	}()
 	waitPending(c, 1)
-	pw.Write([]byte(errorResponse))
+	_, _ = pw.Write([]byte(errorResponse))
 	got := <-r2
 	if got.err == nil {
 		t.Fatal("expected RPC error, got nil")
@@ -163,7 +168,8 @@ func TestClientReceiveNotification(t *testing.T) {
 			continue
 		}
 		var rp receiveParams
-		if err := json.Unmarshal(f.Params, &rp); err != nil {
+		err := json.Unmarshal(f.Params, &rp)
+		if err != nil {
 			t.Fatalf("decode params: %v", err)
 		}
 		if rp.Envelope.DataMessage == nil {
@@ -186,7 +192,8 @@ func TestClientReceiveNotification(t *testing.T) {
 		t.Error("expected to observe the group notification too")
 	}
 
-	if err := <-readDone; err != nil && err != io.EOF {
+	err := <-readDone
+	if err != nil && !errors.Is(err, io.EOF) {
 		t.Fatalf("reader err: %v", err)
 	}
 }
@@ -211,13 +218,13 @@ func TestClientConcurrentCalls(t *testing.T) {
 	// prove id-routing works.
 
 	pr, pw := io.Pipe()
-	defer pw.Close()
-	defer pr.Close()
+	defer func() { _ = pw.Close() }()
+	defer func() { _ = pr.Close() }()
 
 	var reqBuf bytes.Buffer
 	c := newClient(&reqBuf)
 	notifs := make(chan frame, 4)
-	go c.read(pr, notifs)
+	go func() { _ = c.read(pr, notifs) }()
 	go func() {
 		for range notifs {
 		}
@@ -245,8 +252,8 @@ func TestClientConcurrentCalls(t *testing.T) {
 	waitForPending(c, 2)
 
 	// Respond id=2 first, then id=1.
-	pw.Write([]byte(`{"jsonrpc":"2.0","id":2,"result":{"v":"second"}}` + "\n"))
-	pw.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"v":"first"}}` + "\n"))
+	_, _ = pw.Write([]byte(`{"jsonrpc":"2.0","id":2,"result":{"v":"second"}}` + "\n"))
+	_, _ = pw.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"v":"first"}}` + "\n"))
 
 	wg.Wait()
 
@@ -276,7 +283,8 @@ func TestReceiveAttachmentDecoding(t *testing.T) {
 			continue
 		}
 		var rp receiveParams
-		if err := json.Unmarshal(f.Params, &rp); err != nil {
+		err := json.Unmarshal(f.Params, &rp)
+		if err != nil {
 			t.Fatalf("decode params: %v", err)
 		}
 		dm = rp.Envelope.DataMessage
@@ -312,7 +320,8 @@ func TestReceiveAttachmentDecoding(t *testing.T) {
 		t.Errorf("contentType = %q", atts[0].ContentType)
 	}
 
-	if err := <-readDone; err != nil && err != io.EOF {
+	err := <-readDone
+	if err != nil && !errors.Is(err, io.EOF) {
 		t.Fatalf("reader err: %v", err)
 	}
 }

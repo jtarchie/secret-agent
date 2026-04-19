@@ -41,22 +41,24 @@ func compileSh(script string) (func(context.Context, map[string]any) (any, error
 			interp.StdIO(nil, &stdout, &stderr),
 		)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("new shell runner: %w", err)
 		}
-		if err := runner.Run(ctx, file); err != nil {
+		err = runner.Run(ctx, file)
+		if err != nil {
 			msg := strings.TrimSpace(stderr.String())
 			if msg != "" {
 				return nil, fmt.Errorf("%w: %s", err, msg)
 			}
-			return nil, err
+			return nil, fmt.Errorf("shell run: %w", err)
 		}
 
 		out := strings.TrimSpace(stdout.String())
 		if out == "" {
-			return nil, nil
+			return nil, nil //nolint:nilnil // (nil, nil) is the pass-through signal
 		}
 		var decoded any
-		if err := json.Unmarshal([]byte(out), &decoded); err != nil {
+		err = json.Unmarshal([]byte(out), &decoded)
+		if err != nil {
 			// Stdout is non-JSON; treat it as a scalar string result.
 			return out, nil
 		}
@@ -85,7 +87,7 @@ func toEnvValue(v any) (string, error) {
 	default:
 		b, err := json.Marshal(v)
 		if err != nil {
-			return "", err
+			return "", fmt.Errorf("marshal json: %w", err)
 		}
 		return string(b), nil
 	}

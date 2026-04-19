@@ -82,7 +82,9 @@ func New(ctx context.Context, b *bot.Bot, llm adkmodel.LLM, opts ...Option) (*Ru
 		o(&cfg)
 	}
 
+	_ = ctx // reserved for future use; setup performs no I/O that needs cancellation
 	bld := &builder{recorder: cfg.recorder}
+	//nolint:contextcheck // buildAgent is pure wiring — no I/O to cancel, so ctx is intentionally not threaded through
 	root, err := bld.buildAgent(b.Name, fmt.Sprintf("YAML-defined bot %q", b.Name), b, llm, true)
 	if err != nil {
 		return nil, err
@@ -122,6 +124,7 @@ type builder struct {
 // keys and descriptions drive what the parent LLM sees. isRoot is true only
 // for the top-level call so eval recorders fire once per turn at the outer
 // boundary rather than once per sub-agent level.
+//nolint:cyclop // sequential wiring of MCP toolsets, tools, sub-agents, hooks, and recorders reads clearly top-to-bottom
 func (bld *builder) buildAgent(name, description string, b *bot.Bot, llm adkmodel.LLM, isRoot bool) (agent.Agent, error) {
 	toolsets := make([]adktool.Toolset, 0, len(b.MCP))
 	for _, m := range b.MCP {
@@ -265,6 +268,7 @@ func (r *Runtime) PreflightMCP(ctx context.Context, timeout time.Duration) error
 // The underlying ADK session is created lazily (in-memory) on first use.
 // In stateless mode each turn gets its own session ID so no history
 // accumulates across turns.
+//nolint:gocognit // the per-conv streaming handler keeps session setup, cancellation, and event pumping in one place
 func (r *Runtime) HandlerFor(convID string) func(context.Context, chat.Message) <-chan chat.Chunk {
 	return func(ctx context.Context, userMsg chat.Message) <-chan chat.Chunk {
 		out := make(chan chat.Chunk)
@@ -286,7 +290,8 @@ func (r *Runtime) HandlerFor(convID string) func(context.Context, chat.Message) 
 				sessionID = fmt.Sprintf("%s#t%d", convID, r.turnSeq.Add(1))
 			}
 
-			if err := r.ensureSession(ctx, sessionID); err != nil {
+			err := r.ensureSession(ctx, sessionID)
+			if err != nil {
 				emit(chat.Chunk{Err: err})
 				return
 			}
@@ -323,7 +328,11 @@ func (r *Runtime) HandlerFor(convID string) func(context.Context, chat.Message) 
 // buildUserContent composes a user-role genai.Content from a chat.Message by
 // delegating to the shared tool.BuildAttachedContent helper.
 func buildUserContent(msg chat.Message) (*genai.Content, error) {
-	return tool.BuildAttachedContent(msg.Text, msg.Attachments)
+	c, err := tool.BuildAttachedContent(msg.Text, msg.Attachments)
+	if err != nil {
+		return nil, fmt.Errorf("build user content: %w", err)
+	}
+	return c, nil
 }
 
 func isTextMime(mime string) bool {
@@ -336,11 +345,12 @@ func (r *Runtime) ensureSession(ctx context.Context, convID string) error {
 	if _, ok := r.known[convID]; ok {
 		return nil
 	}
-	if _, err := r.sessions.Create(ctx, &session.CreateRequest{
+	_, err := r.sessions.Create(ctx, &session.CreateRequest{
 		AppName:   r.appName,
 		UserID:    convID,
 		SessionID: convID,
-	}); err != nil {
+	})
+	if err != nil {
 		return fmt.Errorf("create session %q: %w", convID, err)
 	}
 	r.known[convID] = struct{}{}

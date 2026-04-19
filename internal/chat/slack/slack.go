@@ -73,16 +73,16 @@ func New(botToken, appToken string, opts ...Option) *Transport {
 // connection is terminally lost.
 func (t *Transport) Run(ctx context.Context, dispatcher chat.Dispatcher) error {
 	if t.botToken == "" {
-		return fmt.Errorf("slack transport: bot token is required")
+		return errors.New("slack transport: bot token is required")
 	}
 	if t.appToken == "" {
-		return fmt.Errorf("slack transport: app token is required")
+		return errors.New("slack transport: app token is required")
 	}
 	if !strings.HasPrefix(t.botToken, "xoxb-") {
-		return fmt.Errorf("slack transport: bot token must start with xoxb-")
+		return errors.New("slack transport: bot token must start with xoxb-")
 	}
 	if !strings.HasPrefix(t.appToken, "xapp-") {
-		return fmt.Errorf("slack transport: app token must start with xapp-")
+		return errors.New("slack transport: app token must start with xapp-")
 	}
 
 	log := t.logger.With("component", "slack")
@@ -152,7 +152,7 @@ func (t *Transport) handleEvent(
 	botID string,
 	evt socketmode.Event,
 ) {
-	switch evt.Type {
+	switch evt.Type { //nolint:exhaustive // we only handle the subset of events we care about
 	case socketmode.EventTypeConnecting:
 		log.Info("slack socket mode: connecting")
 	case socketmode.EventTypeConnected:
@@ -169,7 +169,8 @@ func (t *Transport) handleEvent(
 		}
 		// Always ack before we start the real work.
 		if evt.Request != nil {
-			if err := sm.AckCtx(ctx, evt.Request.EnvelopeID, nil); err != nil {
+			err := sm.AckCtx(ctx, evt.Request.EnvelopeID, nil)
+			if err != nil {
 				log.Warn("ack failed", "err", err)
 			}
 		}
@@ -247,7 +248,7 @@ func (t *Transport) handleMessage(
 
 	if replyErr != nil {
 		peerLog.Error("handler failed", "err", replyErr, "duration", dur)
-		body = fmt.Sprintf("error: %s", replyErr.Error())
+		body = "error: " + replyErr.Error()
 	} else if body == "" {
 		peerLog.Debug("empty reply — nothing to send", "duration", dur)
 		return
@@ -266,7 +267,8 @@ func (t *Transport) handleMessage(
 		opts = append(opts, slackgo.MsgOptionTS(ts))
 	}
 	sendStart := time.Now()
-	if _, _, err := api.PostMessageContext(ctx, ev.Channel, opts...); err != nil {
+	_, _, err := api.PostMessageContext(ctx, ev.Channel, opts...)
+	if err != nil {
 		peerLog.Error("send failed", "err", err, "duration", time.Since(sendStart))
 		return
 	}
@@ -285,7 +287,8 @@ func (t *Transport) downloadFiles(
 	out := make([]chat.Attachment, 0, len(files))
 	for _, f := range files {
 		path := filepath.Join(dir, f.ID+"-"+safeFilename(f.Name))
-		if err := t.downloadOne(ctx, f.DownloadURL, path); err != nil {
+		err := t.downloadOne(ctx, f.DownloadURL, path)
+		if err != nil {
 			log.Warn("download failed", "file_id", f.ID, "url", f.DownloadURL, "err", err)
 			continue
 		}
@@ -303,24 +306,27 @@ func (t *Transport) downloadOne(ctx context.Context, url, dest string) error {
 	defer cancel()
 	req, err := http.NewRequestWithContext(dlCtx, http.MethodGet, url, nil)
 	if err != nil {
-		return err
+		return fmt.Errorf("new request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+t.botToken)
 	resp, err := t.httpClient.Do(req)
 	if err != nil {
-		return err
+		return fmt.Errorf("http do: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode/100 != 2 {
 		return fmt.Errorf("http %d", resp.StatusCode)
 	}
 	f, err := os.Create(dest)
 	if err != nil {
-		return err
+		return fmt.Errorf("create %s: %w", dest, err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	_, err = io.Copy(f, resp.Body)
-	return err
+	if err != nil {
+		return fmt.Errorf("copy %s: %w", dest, err)
+	}
+	return nil
 }
 
 // safeFilename strips path separators so a hostile filename can't escape

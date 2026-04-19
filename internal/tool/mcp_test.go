@@ -2,6 +2,7 @@ package tool
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -70,7 +71,7 @@ func TestHeaderHTTPClientInjectsHeaders(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 
 	if gotAuth != "Bearer secret" {
 		t.Errorf("Authorization = %q, want %q", gotAuth, "Bearer secret")
@@ -107,7 +108,8 @@ func TestPreflightMCPSuccess(t *testing.T) {
 		t.Fatalf("mcptoolset.New: %v", err)
 	}
 
-	if err := PreflightMCP(ctx, ts); err != nil {
+	err = PreflightMCP(ctx, ts)
+	if err != nil {
 		t.Fatalf("PreflightMCP: %v", err)
 	}
 }
@@ -122,7 +124,7 @@ func (blockingToolset) Description() string { return "blocks until context is do
 func (blockingToolset) IsLongRunning() bool { return false }
 func (blockingToolset) Tools(ctx agent.ReadonlyContext) ([]adktool.Tool, error) {
 	<-ctx.Done()
-	return nil, ctx.Err()
+	return nil, fmt.Errorf("blocking toolset: %w", ctx.Err())
 }
 
 func TestPreflightMCPTimeout(t *testing.T) {
@@ -166,7 +168,7 @@ func TestHeaderHTTPClientPreservesExistingHeader(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Do: %v", err)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 
 	if got != "Bearer caller" {
 		t.Errorf("Authorization = %q, want caller's value to win", got)

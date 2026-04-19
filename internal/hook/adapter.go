@@ -2,6 +2,7 @@ package hook
 
 import (
 	"fmt"
+	"strings"
 
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
@@ -118,7 +119,8 @@ func beforeModel(h Compiled) llmagent.BeforeModelCallback {
 			"model":    req.Model,
 			"messages": contentsToAny(req.Contents),
 		}
-		if _, err := h.Run(cctx, env); err != nil {
+		_, err := h.Run(cctx, env)
+		if err != nil {
 			return nil, fmt.Errorf("before_model: %w", err)
 		}
 		return nil, nil
@@ -250,11 +252,13 @@ func responseToAny(r *model.LLMResponse) map[string]any {
 	if r.Content != nil {
 		out["content"] = contentToAny(r.Content)
 		text := ""
+		var textSb253 strings.Builder
 		for _, p := range r.Content.Parts {
 			if p != nil {
-				text += p.Text
+				textSb253.WriteString(p.Text)
 			}
 		}
+		text += textSb253.String()
 		out["text"] = text
 	}
 	return out

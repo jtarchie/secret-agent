@@ -2,6 +2,7 @@ package tool
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strconv"
@@ -32,7 +33,7 @@ func AttachmentsFromContext(ctx context.Context) []chat.Attachment {
 // descriptive error listing what *is* available so the model can retry.
 func resolveAttachment(value any, atts []chat.Attachment) (string, error) {
 	if len(atts) == 0 {
-		return "", fmt.Errorf("no attachments in this turn")
+		return "", errors.New("no attachments in this turn")
 	}
 	s, ok := value.(string)
 	if !ok {
@@ -40,10 +41,11 @@ func resolveAttachment(value any, atts []chat.Attachment) (string, error) {
 	}
 	s = strings.TrimSpace(s)
 	if s == "" {
-		return "", fmt.Errorf("empty attachment reference")
+		return "", errors.New("empty attachment reference")
 	}
 
-	if n, err := strconv.Atoi(s); err == nil {
+	n, err := strconv.Atoi(s)
+	if err == nil {
 		if n < 0 || n >= len(atts) {
 			return "", fmt.Errorf("attachment index %d out of range (have %d)", n, len(atts))
 		}

@@ -35,10 +35,10 @@ type Transport struct {
 	Type TransportType `yaml:"type"`
 
 	// Signal fields.
-	Account    string `yaml:"account,omitempty"`
-	StateDir   string `yaml:"state_dir,omitempty"`
-	Command    string `yaml:"command,omitempty"`
-	Verbose    int    `yaml:"verbose,omitempty"`
+	Account  string `yaml:"account,omitempty"`
+	StateDir string `yaml:"state_dir,omitempty"`
+	Command  string `yaml:"command,omitempty"`
+	Verbose  int    `yaml:"verbose,omitempty"`
 
 	// Slack fields. Secrets must be supplied via env var indirection.
 	BotTokenEnv string `yaml:"bot_token_env,omitempty"`
@@ -56,7 +56,8 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("read %s: %w", path, err)
 	}
 	var cfg Config
-	if err := yaml.Unmarshal(data, &cfg); err != nil {
+	err = yaml.Unmarshal(data, &cfg)
+	if err != nil {
 		return nil, fmt.Errorf("parse %s: %w", path, err)
 	}
 
@@ -85,7 +86,8 @@ func Load(path string) (*Config, error) {
 			return nil, fmt.Errorf("%s: transports[%d]: duplicate type %q (first declared at transports[%d])", path, i, t.Type, first)
 		}
 		seen[t.Type] = i
-		if err := normalizeTransport(t, i, path); err != nil {
+		err := normalizeTransport(t, i, path)
+		if err != nil {
 			return nil, err
 		}
 	}

@@ -64,7 +64,10 @@ func (t *Transport) Run(ctx context.Context, d chat.Dispatcher) error {
 		prog.Quit()
 	}()
 	_, err := prog.Run()
-	return err
+	if err != nil {
+		return fmt.Errorf("run tui: %w", err)
+	}
+	return nil
 }
 
 type (
@@ -111,6 +114,7 @@ var keys = keyMap{
 }
 
 type model struct {
+	//nolint:containedctx // bubbletea's Model interface has no way to thread ctx through Update; handler invocations need the original request ctx
 	ctx      context.Context
 	botName  string
 	handler  handlerFunc
@@ -121,20 +125,20 @@ type model struct {
 	width    int
 	height   int
 
-	stream        <-chan chat.Chunk
-	cancel        context.CancelFunc
-	canceled      bool
-	hadError      bool
-	replyIdx      int
-	replyBuf      strings.Builder
-	spinner       spinner.Model
-	inputHist     []string
-	inputHistIdx  int
-	help          help.Model
-	lastReply     string
-	markdown      bool
-	mouseOn       bool
-	renderer      *glamour.TermRenderer
+	stream       <-chan chat.Chunk
+	cancel       context.CancelFunc
+	canceled     bool
+	hadError     bool
+	replyIdx     int
+	replyBuf     strings.Builder
+	spinner      spinner.Model
+	inputHist    []string
+	inputHistIdx int
+	help         help.Model
+	lastReply    string
+	markdown     bool
+	mouseOn      bool
+	renderer     *glamour.TermRenderer
 
 	userStyle   lipgloss.Style
 	botStyle    lipgloss.Style
@@ -180,6 +184,7 @@ func (m *model) Init() tea.Cmd {
 	return textarea.Blink
 }
 
+//nolint:gocognit,cyclop // bubbletea Update is a standard message-type switch; splitting would scatter related cases
 func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
@@ -199,19 +204,19 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "pgup":
-			m.viewport.ViewUp()
+			m.viewport.PageUp()
 			return m, nil
 		case "pgdown":
-			m.viewport.ViewDown()
+			m.viewport.PageDown()
 			return m, nil
 		case "ctrl+u":
-			m.viewport.HalfViewUp()
+			m.viewport.HalfPageUp()
 			return m, nil
 		case "ctrl+d":
-			m.viewport.HalfViewDown()
+			m.viewport.HalfPageDown()
 			return m, nil
 		}
-		switch msg.Type {
+		switch msg.Type { //nolint:exhaustive // we only care about a small handful of keys
 		case tea.KeyCtrlC:
 			if m.waiting && m.cancel != nil {
 				m.cancel()
@@ -413,7 +418,8 @@ func (m *model) runSlash(cmd string) (tea.Model, tea.Cmd) {
 			m.appendLine(m.errorStyle.Render("error") + ": no reply to copy yet")
 			return m, nil
 		}
-		if err := clipboard.WriteAll(m.lastReply); err != nil {
+		err := clipboard.WriteAll(m.lastReply)
+		if err != nil {
 			m.appendLine(m.errorStyle.Render("error") + ": " + err.Error())
 			return m, nil
 		}

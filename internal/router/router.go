@@ -6,6 +6,7 @@ package router
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -97,7 +98,7 @@ func WithLogger(l *slog.Logger) Option { return func(r *Router) { r.logger = l }
 // before (triggers optional).
 func New(routes []Route, opts ...Option) (*Router, error) {
 	if len(routes) == 0 {
-		return nil, fmt.Errorf("router: at least one route is required")
+		return nil, errors.New("router: at least one route is required")
 	}
 
 	if len(routes) > 1 {
@@ -177,32 +178,32 @@ func (rt *Route) scopeMatches(env chat.Envelope) bool {
 				return false
 			}
 		}
-		if len(users) > 0 {
-			if senderKey == "" {
-				return false
-			}
-			if _, ok := users[senderKey]; !ok {
-				return false
-			}
+		if len(users) > 0 && !senderInSet(senderKey, users) {
+			return false
 		}
 		return true
 	}
 
-	if len(users) > 0 {
-		if senderKey == "" {
-			return false
-		}
-		if _, ok := users[senderKey]; !ok {
-			return false
-		}
+	if len(users) > 0 && !senderInSet(senderKey, users) {
+		return false
 	}
 	return true
+}
+
+func senderInSet(senderKey string, users map[string]struct{}) bool {
+	if senderKey == "" {
+		return false
+	}
+	_, ok := users[senderKey]
+	return ok
 }
 
 // Dispatch selects the single Route whose scope covers the envelope and
 // whose trigger matches msg.Text, then delegates to that route's handler.
 // If no scoped route triggers, the message is buffered (when any scoped
 // route has buffering enabled) and a closed channel is returned.
+//
+//nolint:cyclop // the scope → trigger → buffer → dispatch flow reads top-to-bottom; splitting would not clarify
 func (r *Router) Dispatch(ctx context.Context, env chat.Envelope, msg chat.Message) <-chan chat.Chunk {
 	scoped := make([]*Route, 0, len(r.routes))
 	for i := range r.routes {
@@ -221,7 +222,7 @@ func (r *Router) Dispatch(ctx context.Context, env chat.Envelope, msg chat.Messa
 	// Find the triggered route. Disjointness guarantees at most one.
 	var selected *Route
 	for _, rt := range scoped {
-		if rt.matcher == nil {
+		if rt.matcher == nil || len(rt.matcher.res) == 0 {
 			// Single-bot router: no triggers configured. Always triggers.
 			selected = rt
 			break
