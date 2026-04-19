@@ -2,5 +2,4 @@
 - support secrets via environment variables
 - cron scheduling?
 - withing a container image / Dockerfile
-- MCPs of course
 - subagents can specify their own models?
