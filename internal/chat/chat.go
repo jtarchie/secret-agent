@@ -25,17 +25,25 @@ type Message struct {
 	Attachments []Attachment
 }
 
-// Handler handles a single user message and returns a channel of reply chunks.
-// The channel is closed when the turn completes.
-type Handler func(ctx context.Context, msg Message) <-chan Chunk
+// Envelope carries the sender metadata a Dispatcher needs to route a message
+// across multiple bots. Transports build it from their own native identity
+// fields; the router matches on SenderPhone / GroupID.
+type Envelope struct {
+	ConvID      string // stable conversation key: peer ACI for DM, "group:<id>" for group, "self:<num>" for self
+	Kind        string // "dm" | "group" | "self" | "cli"
+	SenderPhone string // E.164 when available, else empty
+	GroupID     string // populated only for group messages
+}
 
-// HandlerFactory returns a Handler bound to a specific conversation ID.
-// Single-peer transports (CLI) call it once with a constant ID; multi-peer
-// transports (Signal) call it per peer.
-type HandlerFactory func(convID string) Handler
+// Dispatcher receives a preclassified message with sender metadata and
+// returns a reply stream. If no route matches, implementations return a
+// channel that is closed immediately with no chunks.
+type Dispatcher interface {
+	Dispatch(ctx context.Context, env Envelope, msg Message) <-chan Chunk
+}
 
-// Transport runs a chat I/O loop. It obtains per-conversation Handlers
-// from the factory as needed.
+// Transport runs a chat I/O loop. It feeds incoming messages into the
+// dispatcher and sends reply chunks back to the underlying transport.
 type Transport interface {
-	Run(ctx context.Context, botName string, newHandler HandlerFactory) error
+	Run(ctx context.Context, botName string, d Dispatcher) error
 }

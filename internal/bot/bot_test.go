@@ -518,6 +518,64 @@ mcp:
 	}
 }
 
+func TestLoadUsersValid(t *testing.T) {
+	p := writeBot(t, `
+name: b
+system: s
+users:
+  - "+15551234567"
+  - "  +15557654321  "
+  - "+15551234567"
+`)
+	b, err := Load(p)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if len(b.Users) != 2 {
+		t.Fatalf("len(users) = %d, want 2 (trimmed + deduped); got %v", len(b.Users), b.Users)
+	}
+	if b.Users[0] != "+15551234567" || b.Users[1] != "+15557654321" {
+		t.Errorf("users = %v", b.Users)
+	}
+}
+
+func TestLoadUsersRejectsNonE164(t *testing.T) {
+	p := writeBot(t, `
+name: b
+system: s
+users:
+  - "not a phone"
+`)
+	_, err := Load(p)
+	if err == nil {
+		t.Fatal("expected error for non-E.164 user")
+	}
+	if !strings.Contains(err.Error(), "E.164") {
+		t.Errorf("error should mention E.164: %v", err)
+	}
+}
+
+func TestLoadGroupsTrimAndDedupe(t *testing.T) {
+	p := writeBot(t, `
+name: b
+system: s
+groups:
+  - "  group-A  "
+  - "group-B"
+  - "group-A"
+`)
+	b, err := Load(p)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if len(b.Groups) != 2 {
+		t.Fatalf("len(groups) = %d, want 2; got %v", len(b.Groups), b.Groups)
+	}
+	if b.Groups[0] != "group-A" || b.Groups[1] != "group-B" {
+		t.Errorf("groups = %v", b.Groups)
+	}
+}
+
 func TestLoadPermissionsInvalidMemory(t *testing.T) {
 	p := writeBot(t, `
 name: b

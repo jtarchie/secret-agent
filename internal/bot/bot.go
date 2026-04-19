@@ -16,6 +16,8 @@ type Bot struct {
 	Name        string              `yaml:"name"`
 	System      string              `yaml:"system"`
 	Triggers    []string            `yaml:"triggers,omitempty"`
+	Users       []string            `yaml:"users,omitempty"`
+	Groups      []string            `yaml:"groups,omitempty"`
 	Permissions Permissions         `yaml:"permissions,omitempty"`
 	Tools       []Tool              `yaml:"tools"`
 	Agents      map[string]AgentRef `yaml:"agents"`
@@ -197,6 +199,7 @@ type Param struct {
 var (
 	shorthandRe    = regexp.MustCompile(`^(string|integer|number|boolean|attachment)(!)?(?:=(.*))?$`)
 	paramNameRe    = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+	e164Re         = regexp.MustCompile(`^\+[1-9]\d{6,14}$`)
 	reservedParams = map[string]struct{}{
 		"path": {}, "home": {}, "user": {}, "shell": {}, "pwd": {},
 		"ifs": {}, "ld_preload": {}, "ld_library_path": {},
@@ -479,6 +482,43 @@ func loadBot(path string, visited map[string]bool, depth int) (*Bot, error) {
 			deduped = append(deduped, t)
 		}
 		b.Triggers = deduped
+	}
+
+	if len(b.Users) > 0 {
+		seen := make(map[string]struct{}, len(b.Users))
+		deduped := b.Users[:0]
+		for i, u := range b.Users {
+			u = strings.TrimSpace(u)
+			if u == "" {
+				return nil, fmt.Errorf("%s: users[%d]: must not be empty", path, i)
+			}
+			if !e164Re.MatchString(u) {
+				return nil, fmt.Errorf("%s: users[%d]: %q is not a valid E.164 phone number", path, i, u)
+			}
+			if _, dup := seen[u]; dup {
+				continue
+			}
+			seen[u] = struct{}{}
+			deduped = append(deduped, u)
+		}
+		b.Users = deduped
+	}
+
+	if len(b.Groups) > 0 {
+		seen := make(map[string]struct{}, len(b.Groups))
+		deduped := b.Groups[:0]
+		for i, g := range b.Groups {
+			g = strings.TrimSpace(g)
+			if g == "" {
+				return nil, fmt.Errorf("%s: groups[%d]: must not be empty", path, i)
+			}
+			if _, dup := seen[g]; dup {
+				continue
+			}
+			seen[g] = struct{}{}
+			deduped = append(deduped, g)
+		}
+		b.Groups = deduped
 	}
 
 	for i := range b.Tools {

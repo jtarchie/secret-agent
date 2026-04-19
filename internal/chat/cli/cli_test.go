@@ -22,7 +22,7 @@ func nopHandler(_ context.Context, _ chat.Message) <-chan chat.Chunk {
 // slot in history with replyIdx pointing at it.
 func primeModelForReply(t *testing.T) *model {
 	t.Helper()
-	m := newModel(context.Background(), "bot", nopHandler, false, true)
+	m := newModel(context.Background(), "bot", nopHandler, false)
 	m.history = append(m.history, "you: hi", m.thinkingLine())
 	m.replyIdx = len(m.history) - 1
 	m.waiting = true

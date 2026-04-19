@@ -16,6 +16,7 @@ import (
 	signaltransport "github.com/jtarchie/secret-agent/internal/chat/signal"
 	"github.com/jtarchie/secret-agent/internal/eval"
 	"github.com/jtarchie/secret-agent/internal/model"
+	"github.com/jtarchie/secret-agent/internal/router"
 	"github.com/jtarchie/secret-agent/internal/runtime"
 )
 
@@ -29,14 +30,15 @@ func newLogger(verbose int) *slog.Logger {
 }
 
 const usage = `usage:
-  secret-agent run --model <provider/model-name> --api-key <key> [--transport cli|signal] [--skip-preflight] [signal flags] <bot.yml>
+  secret-agent run --model <provider/model-name> --api-key <key> [--transport cli|signal] [--skip-preflight] [signal flags] <bot.yml> [bot.yml ...]
   secret-agent eval --model <provider/model-name> --api-key <key> [--skip-preflight] [--verbose] <bot.yml>
   secret-agent signal-link --signal-state-dir <path> [--signal-device-name <name>]
 
 examples:
   secret-agent run --model openrouter/anthropic/claude-sonnet-4-5 --api-key $OPENROUTER_API_KEY examples/hello-world.yml
   secret-agent run --model anthropic/claude-sonnet-4-5-20250929 --api-key $ANTHROPIC_API_KEY \
-      --transport signal --signal-account +15551234567 --signal-state-dir ./signal-state examples/hello-world.yml
+      --transport signal --signal-account +15551234567 --signal-state-dir ./signal-state \
+      examples/admin-bot.yml examples/public-bot.yml
   secret-agent eval --model anthropic/claude-sonnet-4-5-20250929 --api-key $ANTHROPIC_API_KEY examples/hello-world.yml
   secret-agent signal-link --signal-state-dir ./signal-state
 `
@@ -83,15 +85,14 @@ func runRun(args []string) error {
 		return err
 	}
 
-	if *modelFlag == "" || *keyFlag == "" || fs.NArg() != 1 {
+	if *modelFlag == "" || *keyFlag == "" || fs.NArg() < 1 {
 		fmt.Fprint(os.Stderr, usage)
-		return fmt.Errorf("--model, --api-key, and a bot YAML path are all required")
+		return fmt.Errorf("--model, --api-key, and at least one bot YAML path are required")
 	}
 
-	path := fs.Arg(0)
-	b, err := bot.Load(path)
-	if err != nil {
-		return err
+	paths := fs.Args()
+	if *transportFlag == "cli" && len(paths) > 1 {
+		return fmt.Errorf("--transport=cli only supports a single bot YAML (got %d)", len(paths))
 	}
 
 	provider, name := model.SplitModel(*modelFlag)
@@ -112,26 +113,41 @@ func runRun(args []string) error {
 		}
 	}
 
-	rt, err := runtime.New(ctx, b, llm)
+	logger := newLogger(*verboseFlag)
+
+	routes := make([]router.Route, 0, len(paths))
+	for _, p := range paths {
+		b, err := bot.Load(p)
+		if err != nil {
+			return err
+		}
+		rt, err := runtime.New(ctx, b, llm)
+		if err != nil {
+			return fmt.Errorf("runtime for bot %q: %w", b.Name, err)
+		}
+		if !*skipPreflightFlag {
+			if err := rt.PreflightMCP(ctx, *mcpPreflightTimeoutFlag); err != nil {
+				return fmt.Errorf("mcp preflight failed for bot %q (use --skip-preflight to bypass): %w", b.Name, err)
+			}
+		}
+		route, err := router.RouteFromBot(b, rt.HandlerFor)
+		if err != nil {
+			return err
+		}
+		routes = append(routes, route)
+	}
+
+	rtr, err := router.New(routes, router.WithLogger(logger))
 	if err != nil {
 		return err
 	}
 
-	if !*skipPreflightFlag {
-		if err := rt.PreflightMCP(ctx, *mcpPreflightTimeoutFlag); err != nil {
-			return fmt.Errorf("mcp preflight failed (use --skip-preflight to bypass): %w", err)
-		}
-	}
-
-	attachmentsOK := b.Permissions.AttachmentsAllowed()
-	bufferingOn := b.Permissions.MemoryOrDefault() == bot.MemoryFull
+	primaryName := routes[0].Bot.Name
 
 	var transport chat.Transport
 	switch *transportFlag {
 	case "cli":
-		transport = cli.New(
-			cli.WithAttachmentsAllowed(attachmentsOK),
-		)
+		transport = cli.New()
 	case "signal":
 		if *signalAccountFlag == "" || *signalStateDirFlag == "" {
 			return fmt.Errorf("--transport=signal requires --signal-account and --signal-state-dir")
@@ -140,17 +156,14 @@ func runRun(args []string) error {
 			*signalAccountFlag,
 			*signalStateDirFlag,
 			signaltransport.WithCommand(*signalCmdFlag),
-			signaltransport.WithLogger(newLogger(*verboseFlag)),
+			signaltransport.WithLogger(logger),
 			signaltransport.WithVerbose(*verboseFlag),
-			signaltransport.WithTriggers(b.Triggers),
-			signaltransport.WithBuffering(bufferingOn),
-			signaltransport.WithAttachmentsAllowed(attachmentsOK),
 		)
 	default:
 		return fmt.Errorf("unknown --transport %q (want cli or signal)", *transportFlag)
 	}
 
-	return transport.Run(ctx, b.Name, rt.HandlerFor)
+	return transport.Run(ctx, primaryName, rtr)
 }
 
 func runEval(args []string) error {

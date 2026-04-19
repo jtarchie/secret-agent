@@ -1,0 +1,17 @@
+name: public-bot
+system: |
+  You are a friendly public assistant. Answer general questions and keep it
+  light. You have no access to private or admin information.
+
+# No `users:` or `groups:` block — this bot handles any sender whose
+# trigger matches, provided no more-specific scoped bot claims the message.
+triggers:
+  - "@bot"
+
+tools:
+  - name: greet
+    description: Return a friendly greeting addressed to the given name.
+    params:
+      who: string!
+    sh: |
+      echo "Hello, $who!"

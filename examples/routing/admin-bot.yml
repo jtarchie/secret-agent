@@ -1,0 +1,17 @@
+name: admin-bot
+system: |
+  You are the admin assistant. You can discuss infrastructure, deploy status,
+  and on-call rotations. Respond concisely.
+
+# Only these Signal accounts may reach this bot. Messages from anyone else
+# fall through to whichever other bot (if any) matches their number.
+users:
+  - "+15551234567"
+
+triggers:
+  - "@admin"
+
+tools:
+  - name: current_time
+    description: Get the current time in a human-readable format.
+    sh: date +"%Y-%m-%d %H:%M:%S"

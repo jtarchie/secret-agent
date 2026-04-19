@@ -100,7 +100,9 @@ See [examples/](examples/) for runnable configs. Full field reference below.
 |---|---|---|---|
 | `name` | string | yes | Bot identifier (must match `[A-Za-z_][A-Za-z0-9_]*`). |
 | `system` | string | yes | System prompt / instructions for the LLM. |
-| `triggers` | []string | no | Signal-only: words that gate a response (word-boundary, case-insensitive). |
+| `triggers` | []string | no | Signal-only: words that gate a response (word-boundary, case-insensitive). Required when loading >1 bot. |
+| `users` | []string | no | Signal-only: E.164 allowlist. Empty = all senders. |
+| `groups` | []string | no | Signal-only: group-ID allowlist. Empty = all groups. |
 | `permissions` | object | no | See *Permissions*. |
 | `tools` | []Tool | no | Shell/expr/JS tools the bot can call. |
 | `agents` | map[string]AgentRef | no | Sub-agents callable as tools (max nesting 8, no cycles). |
@@ -169,7 +171,10 @@ Exactly one of `command` / `url` is required.
 
 ## Command-line reference
 
-### `secret-agent run <bot.yml>`
+### `secret-agent run <bot.yml> [bot.yml ...]`
+
+Accepts one bot or many. With multiple bots (Signal only), the router selects one bot per incoming message based on each bot's `users:` / `groups:` scope and `triggers:`. Bots' trigger words must be globally disjoint; every multi-bot run requires ≥1 trigger on each bot. See *Multi-bot routing* below.
+
 
 | Flag | Default | Purpose |
 |---|---|---|
@@ -232,8 +237,32 @@ tests:
 
 - **Message scopes:** DMs (always replied to), groups (only when a `triggers` word matches — never auto-reply), Note-to-Self (own sent echoes suppressed for 2 min).
 - **Triggers:** optional per-bot allowlist; word-boundary regex, case-insensitive. Empty list = reply to every DM.
-- **Buffering:** per-peer FIFO (capacity 10) accumulates un-triggered messages and flushes them inside a `<previous_messages>` block on the next trigger. Disable with `permissions.memory: session` / `none`. Text only; never applied across group members.
+- **Buffering:** per-conversation FIFO (capacity 10) accumulates un-triggered messages and flushes them inside a `<previous_messages>` block on the next trigger. Disable with `permissions.memory: session` / `none`. Text only; never applied across group members.
 - **Attachments:** inbound files downloaded by signal-cli and resolved to `<state-dir>/attachments/<id>`. Strip at transport with `permissions.attachments: false`.
-- **Per-peer isolation:** one in-memory conversation per Signal contact (keyed by ACI UUID), mutex-serialized so multi-chunk replies don't interleave.
+- **Per-peer isolation:** one in-memory conversation per Signal contact (keyed by ACI UUID), mutex-serialized so multi-chunk replies don't interleave — two bots replying to the same peer are serialized through one stdin stream.
 - **Linking:** `signal-link` prints a `sgnl://linkdevice?...` URI and an inline QR (use `--no-qr` for headless).
 - **Shutdown:** SIGINT + 5 s grace lets ratchet state flush.
+
+### Multi-bot routing
+
+`secret-agent run` accepts several bot YAMLs and runs them behind a single Signal account. The router selects one bot per incoming message:
+
+1. **Scope filter.** A bot is eligible if its `users:` allowlist contains the sender (or is empty) and, for group messages, its `groups:` allowlist contains the group ID (or is empty).
+2. **Trigger match.** Among eligible bots, the first one whose `triggers:` matches the message text handles the turn. Unmatched messages are buffered per conversation and flushed into the first later trigger (same bot or not).
+3. **No match.** The message is silently dropped — no bot replies.
+
+Constraints enforced at load time:
+
+- Every bot in multi-bot mode must declare ≥1 trigger.
+- Trigger words must be globally disjoint across bots (case-insensitive). Load fails with an aggregated list of conflicting words.
+- The CLI transport (`--transport=cli`) only accepts a single bot.
+
+Run two bots together:
+
+```bash
+./secret-agent run --model anthropic/claude-sonnet-4-5-20250929 --api-key $ANTHROPIC_API_KEY \
+  --transport signal --signal-account +15551234567 --signal-state-dir ./signal-state \
+  examples/routing/admin-bot.yml examples/routing/public-bot.yml
+```
+
+See [examples/routing/](examples/routing/) for a runnable two-bot fleet.

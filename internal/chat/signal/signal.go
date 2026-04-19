@@ -15,22 +15,18 @@ import (
 )
 
 // Transport is a chat.Transport backed by signal-cli in jsonRpc mode.
-// It receives DMs from Signal, forwards each to a per-peer chat.Handler,
-// buffers the reply, and sends a single Signal message back per turn.
+// It receives DMs and group messages from Signal, forwards each to a
+// chat.Dispatcher along with sender metadata, collects the reply stream,
+// and sends a single Signal message back per turn.
 //
-// Group messages are ignored.
+// Routing (trigger matching, scope filters, prior-message buffering, and
+// per-bot attachment policy) lives in the dispatcher (see internal/router).
 type Transport struct {
 	command  string
 	account  string
 	stateDir string
 	verbose  int
 	logger   *slog.Logger
-
-	triggers         []string
-	matcher          *triggerMatcher
-	buffers          sync.Map // convKey → *peerBuffer
-	bufferingEnabled bool
-	attachmentsOK    bool
 
 	// outbound tracks message bodies we recently sent, keyed by body. Used
 	// to suppress sync.sentMessage echoes of our own Note-to-Self replies.
@@ -53,37 +49,13 @@ func WithLogger(l *slog.Logger) Option { return func(t *Transport) { t.logger = 
 // raising its log level from WARN (the default) to INFO or DEBUG.
 func WithVerbose(n int) Option { return func(t *Transport) { t.verbose = n } }
 
-// WithTriggers configures the set of trigger words the bot waits for before
-// replying. An empty or nil slice keeps the pre-trigger behavior (reply to
-// every DM). Messages without any trigger are buffered per-peer and bundled
-// into the next triggered turn as prior context.
-func WithTriggers(words []string) Option {
-	return func(t *Transport) { t.triggers = append(t.triggers[:0], words...) }
-}
-
-// WithBuffering toggles the per-conversation pending-message buffer. When
-// disabled, un-triggered messages are dropped immediately instead of
-// accumulating for later bundling. Default: enabled.
-func WithBuffering(on bool) Option {
-	return func(t *Transport) { t.bufferingEnabled = on }
-}
-
-// WithAttachmentsAllowed toggles whether user-sent attachments reach the
-// model. When false, attachments are stripped at the transport and the
-// bot never sees them. Default: allowed.
-func WithAttachmentsAllowed(on bool) Option {
-	return func(t *Transport) { t.attachmentsOK = on }
-}
-
 // New creates a Signal transport. account is the linked-device phone number
 // (E.164); stateDir is the signal-cli state directory.
 func New(account, stateDir string, opts ...Option) *Transport {
 	t := &Transport{
-		command:          "signal-cli",
-		account:          account,
-		stateDir:         stateDir,
-		bufferingEnabled: true,
-		attachmentsOK:    true,
+		command:  "signal-cli",
+		account:  account,
+		stateDir: stateDir,
 	}
 	for _, opt := range opts {
 		opt(t)
@@ -94,9 +66,9 @@ func New(account, stateDir string, opts ...Option) *Transport {
 	return t
 }
 
-// Run spawns signal-cli and pumps incoming DMs through newHandler(peerID).
+// Run spawns signal-cli and pumps incoming messages through the dispatcher.
 // Returns when the context is canceled or signal-cli exits.
-func (t *Transport) Run(ctx context.Context, botName string, newHandler chat.HandlerFactory) error {
+func (t *Transport) Run(ctx context.Context, botName string, dispatcher chat.Dispatcher) error {
 	if t.account == "" {
 		return fmt.Errorf("signal transport: account is required")
 	}
@@ -104,16 +76,7 @@ func (t *Transport) Run(ctx context.Context, botName string, newHandler chat.Han
 		return fmt.Errorf("signal transport: stateDir is required")
 	}
 
-	matcher, err := newTriggerMatcher(t.triggers)
-	if err != nil {
-		return fmt.Errorf("signal transport: compile triggers: %w", err)
-	}
-	t.matcher = matcher
-
 	log := t.logger.With("component", "signal", "account", t.account)
-	if t.matcher != nil {
-		log.Info("trigger-word gating enabled", "triggers", t.triggers, "buffer_cap", peerBufferCap)
-	}
 
 	extra := verboseArgs(t.verbose)
 	log.Info("spawning signal-cli",
@@ -174,7 +137,7 @@ func (t *Transport) Run(ctx context.Context, botName string, newHandler chat.Han
 				log.Debug("ignoring non-receive notification", "method", f.Method)
 				continue
 			}
-			t.dispatchReceive(ctx, log, cli, newHandler, lockFor, f)
+			t.dispatchReceive(ctx, log, cli, dispatcher, lockFor, f)
 		}
 	}
 }
@@ -192,7 +155,7 @@ func (t *Transport) dispatchReceive(
 	ctx context.Context,
 	log *slog.Logger,
 	cli *client,
-	newHandler chat.HandlerFactory,
+	dispatcher chat.Dispatcher,
 	lockFor func(string) *sync.Mutex,
 	f frame,
 ) {
@@ -213,15 +176,7 @@ func (t *Transport) dispatchReceive(
 	}
 
 	text := strings.TrimSpace(dm.Message)
-	var atts []chat.Attachment
-	if t.attachmentsOK {
-		atts = t.attachmentsFor(dm.Attachments)
-	} else if len(dm.Attachments) > 0 {
-		log.Debug("dropping attachments: disallowed by bot permissions",
-			"source", env.peerID(),
-			"count", len(dm.Attachments),
-		)
-	}
+	atts := t.attachmentsFor(dm.Attachments)
 	if text == "" && len(atts) == 0 {
 		log.Debug("ignoring empty message", "source", env.peerID())
 		return
@@ -232,55 +187,6 @@ func (t *Transport) dispatchReceive(
 		return
 	}
 
-	// Group messages require an explicit trigger. Without one configured,
-	// stay silent — otherwise the bot would reply to every group message,
-	// which is the behavior the trigger feature exists to avoid.
-	if conv.kind == "group" {
-		if t.matcher == nil {
-			log.Debug("ignoring group message: no trigger configured",
-				"group_id", conv.groupID,
-			)
-			return
-		}
-		if !t.matcher.Matches(text) {
-			log.Debug("ignoring untriggered group message",
-				"group_id", conv.groupID,
-			)
-			return
-		}
-		// Intentional: no buffering across group members — bundling
-		// messages from different senders as prior context is confusing
-		// and the semantics get thorny fast.
-	} else {
-		if t.bufferingEnabled {
-			buf := t.bufferFor(conv.key)
-			if t.matcher != nil && !t.matcher.Matches(text) {
-				buf.Append(text)
-				log.Info("buffered untriggered message",
-					"conv", conv.key,
-					"kind", conv.kind,
-					"bytes", len(text),
-					"dropped_attachments", len(atts),
-				)
-				return
-			}
-			if prior := buf.Drain(); len(prior) > 0 {
-				log.Info("flushing buffered prior messages into turn",
-					"conv", conv.key,
-					"kind", conv.kind,
-					"prior_count", len(prior),
-				)
-				text = wrapWithPrior(prior, text)
-			}
-		} else if t.matcher != nil && !t.matcher.Matches(text) {
-			log.Debug("ignoring untriggered message: buffering disabled",
-				"conv", conv.key,
-				"kind", conv.kind,
-			)
-			return
-		}
-	}
-
 	log.Info("received message",
 		"conv", conv.key,
 		"kind", conv.kind,
@@ -288,8 +194,16 @@ func (t *Transport) dispatchReceive(
 		"bytes", len(text),
 		"attachments", len(atts),
 	)
+
+	chatEnv := chat.Envelope{
+		ConvID:      conv.key,
+		Kind:        conv.kind,
+		SenderPhone: env.SourceNumber,
+		GroupID:     conv.groupID,
+	}
 	msg := chat.Message{Text: text, Attachments: atts}
-	go t.handleDM(ctx, log, cli, newHandler(conv.key), lockFor(conv.key), conv, msg)
+
+	go t.handleDM(ctx, log, cli, dispatcher, chatEnv, lockFor(conv.key), conv, msg)
 }
 
 // classify inspects an envelope and decides how to route it. Returns
@@ -373,17 +287,9 @@ func (t *Transport) rememberOutbound(body string) {
 	})
 }
 
-// bufferFor returns the per-peer message buffer, creating it on first use.
-func (t *Transport) bufferFor(peerID string) *peerBuffer {
-	if v, ok := t.buffers.Load(peerID); ok {
-		return v.(*peerBuffer)
-	}
-	v, _ := t.buffers.LoadOrStore(peerID, &peerBuffer{})
-	return v.(*peerBuffer)
-}
-
 // attachmentsFor resolves signal-cli's attachment metadata to local file paths
 // under <stateDir>/attachments/<id>, where signal-cli stores downloaded blobs.
+// Per-bot attachment policy (strip or keep) is enforced by the dispatcher.
 func (t *Transport) attachmentsFor(in []signalAttach) []chat.Attachment {
 	if len(in) == 0 {
 		return nil
@@ -406,7 +312,8 @@ func (t *Transport) handleDM(
 	ctx context.Context,
 	log *slog.Logger,
 	cli *client,
-	handler chat.Handler,
+	dispatcher chat.Dispatcher,
+	chatEnv chat.Envelope,
 	peerLock *sync.Mutex,
 	conv conversation,
 	userMsg chat.Message,
@@ -419,7 +326,7 @@ func (t *Transport) handleDM(
 	var replyErr error
 	chunkCount := 0
 
-	for chunk := range handler(ctx, userMsg) {
+	for chunk := range dispatcher.Dispatch(ctx, chatEnv, userMsg) {
 		if chunk.Err != nil {
 			replyErr = chunk.Err
 			continue
@@ -435,7 +342,7 @@ func (t *Transport) handleDM(
 		peerLog.Error("handler: failed", "err", replyErr, "duration", dur)
 		body = fmt.Sprintf("error: %s", replyErr.Error())
 	} else if body == "" {
-		peerLog.Warn("handler: empty reply — nothing to send", "duration", dur)
+		peerLog.Debug("handler: empty reply — nothing to send", "duration", dur)
 		return
 	} else {
 		peerLog.Info("handler: done",

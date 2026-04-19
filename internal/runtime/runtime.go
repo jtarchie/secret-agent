@@ -261,11 +261,11 @@ func (r *Runtime) PreflightMCP(ctx context.Context, timeout time.Duration) error
 	return nil
 }
 
-// HandlerFor returns a chat.Handler bound to the given conversation ID.
+// HandlerFor returns a per-turn handler bound to the given conversation ID.
 // The underlying ADK session is created lazily (in-memory) on first use.
 // In stateless mode each turn gets its own session ID so no history
 // accumulates across turns.
-func (r *Runtime) HandlerFor(convID string) chat.Handler {
+func (r *Runtime) HandlerFor(convID string) func(context.Context, chat.Message) <-chan chat.Chunk {
 	return func(ctx context.Context, userMsg chat.Message) <-chan chat.Chunk {
 		out := make(chan chat.Chunk)
 
