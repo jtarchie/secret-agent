@@ -1,0 +1,193 @@
+name: reminder-bot
+system: |
+  You capture reminders into a local SQLite database. You do NOT send or
+  deliver reminders — a separate worker reads the database later. Your only
+  job is to record what the user asks you to remember, faithfully.
+
+  Be decisive. When the user asks you to remember something, call
+  `save_reminder` immediately with your best interpretation. Do NOT ask the
+  user to clarify missing details; fill them in yourself using these rules:
+
+  Parameters for save_reminder:
+    - body: the thing to remember, in the user's own words (verbatim phrase)
+    - remind_at: ISO date (YYYY-MM-DD) of the NEXT occurrence — see date rules
+    - days_before: integer lead-time in days (default 5)
+    - cadence: how often it repeats. Use "once" for non-repeating, or one of
+      "daily" / "weekly" / "monthly" / "yearly", or a phrase like
+      "every 2 weeks" / "every 3 months". Default "once".
+
+  Date rules (apply these silently, never ask):
+    1. Call `today` first whenever a date is ambiguous so you know the
+       current date. Never ask the user what today is.
+    2. US-style "M/D" or "MM/DD" without a year = month/day. Pick the year
+       that makes it the NEXT upcoming occurrence from today. Example: if
+       today is 2026-04-18 and the user says "2/27", remind_at =
+       "2027-02-27" (2026-02-27 already passed). If today is 2026-01-10,
+       remind_at = "2026-02-27".
+    3. "Every <date>" or "on <date>, yearly" → cadence "yearly", remind_at =
+       next upcoming occurrence.
+    4. "Every <weekday>" → cadence "weekly", remind_at = next such weekday.
+    5. "Tomorrow" / "next week" → resolve against today from the tool.
+    6. If the user gives a full ISO date, use it as-is.
+
+  The sender's phone number is provided to `save_reminder` automatically.
+  You do NOT need to ask for it or pass it as a parameter. If you receive
+  an error saying the sender is unknown, the transport (e.g. CLI) did not
+  provide one; relay that to the user.
+
+  Only ask for clarification if the BODY is genuinely missing (e.g. the
+  user just said "@remind" with nothing else). A missing year or ambiguous
+  cadence is never a reason to ask — pick the most natural interpretation
+  and save.
+
+  To review or remove reminders, use `list_reminders` and `delete_reminder`.
+  Always acknowledge a save with the returned reminder id and the date +
+  cadence you chose, so the user can correct you if needed.
+
+# Optional: restrict who may reach this bot. Empty = all senders.
+# users:
+#   - "+15551234567"
+
+triggers:
+  - "@remind"
+
+tools:
+  - name: today
+    description: |
+      Return today's date as an ISO YYYY-MM-DD string. Call this whenever
+      you need to resolve a relative or year-less date (e.g. "2/27",
+      "tomorrow", "next Tuesday") into an absolute date.
+    sh: |
+      date +%Y-%m-%d
+
+  - name: save_reminder
+    description: |
+      Capture a new reminder for the current sender. Creates the user row on
+      first use. Returns the new reminder's id. No phone number parameter
+      is needed — the transport provides the sender's phone automatically.
+    params:
+      body: string!
+      remind_at: string!
+      days_before: integer=5
+      cadence: string=once
+    sh: |
+      if [ -z "$SENDER_PHONE" ]; then
+        echo "error: no sender phone available (transport did not provide one)"
+        exit 1
+      fi
+
+      db=${REMINDERS_DB:-./reminders.db}
+      sqlite3 "$db" < examples/reminders/schema.sql
+
+      # Escape SQL single quotes by doubling them. mvdan.cc/sh doesn't strip
+      # backslash-escaped quotes in ${var//\'/\'\'}, so we use "'" / "''" —
+      # which works in both real bash and mvdan.
+      b=${body//"'"/"''"}
+      r=${remind_at//"'"/"''"}
+      c=${cadence//"'"/"''"}
+      p=${SENDER_PHONE//"'"/"''"}
+
+      sqlite3 "$db" <<SQL
+      INSERT OR IGNORE INTO users (phone_number, slug, created_at, updated_at)
+      VALUES ('$p', lower(hex(randomblob(6))), datetime('now'), datetime('now'));
+
+      INSERT INTO reminders (body, remind_at, days_before, cadence, user_id, created_at, updated_at)
+      VALUES ('$b', '$r', $days_before, '$c',
+              (SELECT id FROM users WHERE phone_number = '$p'),
+              datetime('now'), datetime('now'));
+
+      SELECT 'saved reminder #' || last_insert_rowid();
+      SQL
+
+  - name: list_reminders
+    description: |
+      List every reminder for the current sender, most recent first.
+      Columns: id | remind_at | cadence | days_before | body.
+    sh: |
+      if [ -z "$SENDER_PHONE" ]; then
+        echo "error: no sender phone available (transport did not provide one)"
+        exit 1
+      fi
+
+      db=${REMINDERS_DB:-./reminders.db}
+      sqlite3 "$db" < examples/reminders/schema.sql
+
+      p=${SENDER_PHONE//"'"/"''"}
+
+      sqlite3 -separator ' | ' "$db" <<SQL
+      SELECT r.id, r.remind_at, r.cadence, r.days_before, r.body
+        FROM reminders r
+        JOIN users u ON u.id = r.user_id
+       WHERE u.phone_number = '$p'
+       ORDER BY r.created_at DESC;
+      SQL
+
+  - name: delete_reminder
+    description: |
+      Delete one of the current sender's reminders by id. Scoped to the
+      sender so nobody can delete another user's reminders.
+    params:
+      id: integer!
+    sh: |
+      if [ -z "$SENDER_PHONE" ]; then
+        echo "error: no sender phone available (transport did not provide one)"
+        exit 1
+      fi
+
+      db=${REMINDERS_DB:-./reminders.db}
+      sqlite3 "$db" < examples/reminders/schema.sql
+
+      p=${SENDER_PHONE//"'"/"''"}
+
+      sqlite3 "$db" <<SQL
+      DELETE FROM reminders
+       WHERE id = $id
+         AND user_id = (SELECT id FROM users WHERE phone_number = '$p');
+      SELECT 'deleted ' || changes() || ' row(s)';
+      SQL
+
+# Declarative eval cases. Run with:
+#   REMINDERS_DB=/tmp/reminders-eval.db \
+#     ./secret-agent eval --model <...> --api-key <...> examples/reminders/bot.yml
+# Setting REMINDERS_DB redirects writes away from the default ./reminders.db
+# so evals don't pollute your real data. Delete /tmp/reminders-eval.db after.
+tests:
+  - name: absolute_date_once
+    sender_phone: "+15551234567"
+    input: "@remind call the dentist on 2027-09-14"
+    expect:
+      tool_calls:
+        - name: save_reminder
+          args:
+            remind_at: "2027-09-14"
+            cadence: "once"
+      final_output:
+        contains: ["saved"]
+
+  - name: yearly_us_date_picks_next_occurrence
+    sender_phone: "+15551234567"
+    input: "@remind JT's birthday every 2/27"
+    expect:
+      tool_calls:
+        - name: today
+        - name: save_reminder
+          args:
+            cadence: "yearly"
+      final_output:
+        contains: ["yearly"]
+
+  - name: lists_for_sender
+    sender_phone: "+15551234567"
+    input: "@remind what reminders do I have?"
+    expect:
+      tool_calls:
+        - name: list_reminders
+
+  - name: delete_by_id
+    sender_phone: "+15551234567"
+    input: "@remind delete reminder 42"
+    expect:
+      tool_calls:
+        - name: delete_reminder
+          args:
+            id: 42

@@ -33,6 +33,10 @@ type TestCase struct {
 	Name   string     `yaml:"name"`
 	Input  string     `yaml:"input"`
 	Expect TestExpect `yaml:"expect"`
+	// SenderPhone simulates the transport's sender E.164 phone for this case
+	// so tools can read $SENDER_PHONE just as they would at runtime. Optional;
+	// empty leaves the env var unset (mimicking the CLI transport).
+	SenderPhone string `yaml:"sender_phone,omitempty"`
 }
 
 // TestExpect declares assertions against a single-turn run. All populated

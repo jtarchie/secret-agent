@@ -20,6 +20,7 @@ import (
 	"github.com/jtarchie/secret-agent/internal/bot"
 	"github.com/jtarchie/secret-agent/internal/chat"
 	"github.com/jtarchie/secret-agent/internal/runtime"
+	"github.com/jtarchie/secret-agent/internal/tool"
 )
 
 // Result is the outcome of a single test case.
@@ -70,11 +71,12 @@ func runCase(ctx context.Context, b *bot.Bot, llm adkmodel.LLM, tc bot.TestCase)
 	}
 
 	handler := rt.HandlerFor("eval#" + sanitize(tc.Name))
+	turnCtx := tool.WithSenderPhone(ctx, tc.SenderPhone)
 
 	start := time.Now()
 	var reply strings.Builder
 	var streamErr error
-	for ch := range handler(ctx, chat.Message{Text: tc.Input}) {
+	for ch := range handler(turnCtx, chat.Message{Text: tc.Input}) {
 		if ch.Err != nil {
 			streamErr = ch.Err
 			continue

@@ -15,6 +15,7 @@ import (
 
 	"github.com/jtarchie/secret-agent/internal/bot"
 	"github.com/jtarchie/secret-agent/internal/chat"
+	"github.com/jtarchie/secret-agent/internal/tool"
 )
 
 // Handler is the backend channel the router delegates to once a Route is
@@ -264,7 +265,7 @@ func (r *Router) Dispatch(ctx context.Context, env chat.Envelope, msg chat.Messa
 	)
 
 	handler := selected.Handler(env.ConvID)
-	return handler(ctx, chat.Message{Text: text, Attachments: atts})
+	return handler(tool.WithSenderPhone(ctx, env.SenderPhone), chat.Message{Text: text, Attachments: atts})
 }
 
 func (r *Router) bufferFor(convID string) *peerBuffer {

@@ -38,7 +38,7 @@ func NewJs(name, description, code string, params map[string]bot.Param) (adktool
 			InputSchema: schema,
 		},
 		func(ctx adktool.Context, args map[string]any) (shellResult, error) {
-			env, err := buildRuntimeEnv(name, params, args, AttachmentsFromContext(ctx))
+			env, err := buildRuntimeEnv(name, params, args, AttachmentsFromContext(ctx), SenderPhoneFromContext(ctx))
 			if err != nil {
 				return shellResult{}, err
 			}

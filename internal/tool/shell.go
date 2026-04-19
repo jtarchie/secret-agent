@@ -45,6 +45,9 @@ func NewShell(name, description, script string, params map[string]bot.Param) (ad
 		},
 		func(ctx adktool.Context, args map[string]any) (shellResult, error) {
 			env := os.Environ()
+			if phone := SenderPhoneFromContext(ctx); phone != "" {
+				env = append(env, "SENDER_PHONE="+phone)
+			}
 			atts := AttachmentsFromContext(ctx)
 			for paramName, p := range params {
 				value, ok := args[paramName]
