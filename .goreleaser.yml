@@ -1,0 +1,65 @@
+# yaml-language-server: $schema=https://goreleaser.com/static/schema.json
+version: 2
+
+builds:
+  - id: secret-agent
+    binary: secret-agent
+    main: ./cmd/secret-agent
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ignore:
+      - goos: windows
+        goarch: arm64
+    ldflags:
+      - -s -w
+    flags:
+      - -trimpath
+
+archives:
+  - id: secret-agent
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+
+checksum:
+  name_template: "checksums.txt"
+  algorithm: sha256
+
+changelog:
+  sort: asc
+  use: github
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^ci:"
+      - "^chore:"
+      - Merge pull request
+
+brews:
+  - name: secret-agent
+    repository:
+      owner: jtarchie
+      name: secret-agent
+    homepage: "https://github.com/jtarchie/secret-agent"
+    description: "YAML-defined chat bot with pluggable transports (CLI, Signal, Slack)"
+    license: "MIT"
+    skip_upload: auto
+    install: |
+      bin.install "secret-agent"
+    test: |
+      system "#{bin}/secret-agent", "--help"
+
+release:
+  github:
+    owner: jtarchie
+    name: secret-agent
+  prerelease: auto
