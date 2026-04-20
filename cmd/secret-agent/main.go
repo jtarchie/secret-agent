@@ -292,7 +292,9 @@ func runEval(args []string) error {
 		}
 	}
 
-	results, err := eval.RunAll(ctx, b, llm)
+	results, err := eval.RunAll(ctx, b, llm, eval.WithOnStart(func(name string) {
+		fmt.Printf("RUN   %s\n", name)
+	}))
 	if err != nil {
 		return fmt.Errorf("run eval: %w", err)
 	}

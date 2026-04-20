@@ -33,13 +33,33 @@ type Result struct {
 	FinalText string
 }
 
+// Option configures RunAll.
+type Option func(*options)
+
+type options struct {
+	onStart func(name string)
+}
+
+// WithOnStart registers a callback fired just before each case begins,
+// giving callers a hook for live progress output during slow runs.
+func WithOnStart(f func(name string)) Option {
+	return func(o *options) { o.onStart = f }
+}
+
 // RunAll executes every test in b.Tests sequentially and returns one Result
 // per case. The returned error is non-nil only for setup failures (bad bot,
 // LLM unreachable) — a test that fails its assertions returns Passed=false
 // in its Result, not an error.
-func RunAll(ctx context.Context, b *bot.Bot, llm adkmodel.LLM) ([]Result, error) {
+func RunAll(ctx context.Context, b *bot.Bot, llm adkmodel.LLM, opts ...Option) ([]Result, error) {
+	var o options
+	for _, opt := range opts {
+		opt(&o)
+	}
 	results := make([]Result, 0, len(b.Tests))
 	for _, tc := range b.Tests {
+		if o.onStart != nil {
+			o.onStart(tc.Name)
+		}
 		r, err := runCase(ctx, b, llm, tc)
 		if err != nil {
 			return results, fmt.Errorf("test %q: %w", tc.Name, err)
