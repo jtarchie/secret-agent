@@ -3,6 +3,7 @@ module github.com/jtarchie/secret-agent
 go 1.26.2
 
 require (
+	github.com/JohannesKaufmann/html-to-markdown/v2 v2.5.0
 	github.com/achetronic/adk-utils-go v0.13.0
 	github.com/alecthomas/kong v1.15.0
 	github.com/atotto/clipboard v0.1.4
@@ -16,6 +17,7 @@ require (
 	github.com/mdp/qrterminal/v3 v3.2.1
 	github.com/modelcontextprotocol/go-sdk v1.4.1
 	github.com/slack-go/slack v0.22.0
+	github.com/yuin/goldmark v1.8.2
 	golang.org/x/sync v0.20.0
 	google.golang.org/adk v1.1.0
 	google.golang.org/genai v1.54.0
@@ -27,6 +29,7 @@ require (
 	cloud.google.com/go v0.123.0 // indirect
 	cloud.google.com/go/auth v0.17.0 // indirect
 	cloud.google.com/go/compute/metadata v0.9.0 // indirect
+	github.com/JohannesKaufmann/dom v0.2.0 // indirect
 	github.com/alecthomas/chroma/v2 v2.20.0 // indirect
 	github.com/anthropics/anthropic-sdk-go v1.19.0 // indirect
 	github.com/aymanbagabas/go-osc52/v2 v2.0.1 // indirect
@@ -74,7 +77,6 @@ require (
 	github.com/tidwall/sjson v1.2.5 // indirect
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
 	github.com/yosida95/uritemplate/v3 v3.0.2 // indirect
-	github.com/yuin/goldmark v1.7.13 // indirect
 	github.com/yuin/goldmark-emoji v1.0.6 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.63.0 // indirect

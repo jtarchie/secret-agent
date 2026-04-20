@@ -170,7 +170,7 @@ func (bld *builder) buildAgent(name, description string, b *bot.Bot, llm adkmode
 		)
 		switch {
 		case t.Sh != "":
-			built, err = tool.NewShell(t.Name, t.Description, t.Sh, t.Params)
+			built, err = tool.NewShell(t.Name, t.Description, t.Sh, t.Params, t.Returns)
 		case t.Expr != "":
 			built, err = tool.NewExpr(t.Name, t.Description, t.Expr, t.Params)
 		case t.Js != "":

@@ -35,7 +35,7 @@ func NewExpr(name, description, code string, params map[string]bot.Param) (adkto
 			InputSchema: schema,
 		},
 		func(ctx adktool.Context, args map[string]any) (shellResult, error) {
-			env, err := buildRuntimeEnv(name, params, args, AttachmentsFromContext(ctx), SenderPhoneFromContext(ctx))
+			env, err := buildRuntimeEnv(name, params, args, AttachmentsFromContext(ctx), identityFromContext(ctx))
 			if err != nil {
 				return shellResult{}, err
 			}
@@ -69,11 +69,15 @@ func runExpr(program *vm.Program, env map[string]any) (any, error) {
 // buildRuntimeEnv maps LLM-supplied args to variable bindings for expr/js
 // runtimes. Attachments resolve to their local path; scalars pass through
 // with sloppiness-tolerant coercion to their declared type. The sender's
-// phone is pre-seeded as `sender_phone` ("" when the transport did not
-// provide one); a user-declared param of the same name wins.
-func buildRuntimeEnv(toolName string, params map[string]bot.Param, args map[string]any, atts []chat.Attachment, senderPhone string) (map[string]any, error) {
-	env := make(map[string]any, len(params)+1)
-	env["sender_phone"] = senderPhone
+// identity is pre-seeded as `sender_phone`, `sender_id`, `sender_transport`,
+// and `conv_id` — each "" when the transport did not provide one. A
+// user-declared param of the same name wins.
+func buildRuntimeEnv(toolName string, params map[string]bot.Param, args map[string]any, atts []chat.Attachment, id senderInfo) (map[string]any, error) {
+	env := make(map[string]any, len(params)+4)
+	env["sender_phone"] = id.SenderPhone
+	env["sender_id"] = id.SenderID
+	env["sender_transport"] = id.SenderTransport
+	env["conv_id"] = id.ConvID
 	for paramName, p := range params {
 		value, ok := args[paramName]
 		if !ok || value == nil {

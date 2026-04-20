@@ -50,7 +50,7 @@ func TestBuildRuntimeEnvAppliesDefault(t *testing.T) {
 		},
 		map[string]any{},
 		nil,
-		"",
+		senderInfo{},
 	)
 	if err != nil {
 		t.Fatalf("err: %v", err)
@@ -65,7 +65,7 @@ func TestBuildRuntimeEnvAttachmentAsPath(t *testing.T) {
 		map[string]bot.Param{"f": {Type: bot.ParamAttachment, Required: true}},
 		map[string]any{"f": "0"},
 		[]chat.Attachment{{Path: "/tmp/a.txt", Filename: "a.txt"}},
-		"",
+		senderInfo{},
 	)
 	if err != nil {
 		t.Fatalf("err: %v", err)

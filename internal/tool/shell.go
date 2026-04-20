@@ -26,7 +26,11 @@ type shellResult struct {
 // NewShell returns an ADK tool that executes the given shell script using the
 // pure-Go mvdan.cc/sh interpreter and yields stdout. Declared params are
 // injected as environment variables before the script runs.
-func NewShell(name, description, script string, params map[string]bot.Param) (adktool.Tool, error) {
+//
+// returns: when set to "markdown", the tool's stdout is post-processed
+// through an HTML-to-Markdown converter before being handed back to the
+// LLM. Empty = passthrough.
+func NewShell(name, description, script string, params map[string]bot.Param, returns string) (adktool.Tool, error) {
 	file, err := syntax.NewParser().Parse(strings.NewReader(script), name)
 	if err != nil {
 		return nil, fmt.Errorf("parse script: %w", err)
@@ -47,6 +51,15 @@ func NewShell(name, description, script string, params map[string]bot.Param) (ad
 			env := os.Environ()
 			if phone := SenderPhoneFromContext(ctx); phone != "" {
 				env = append(env, "SENDER_PHONE="+phone)
+			}
+			if id := SenderIDFromContext(ctx); id != "" {
+				env = append(env, "SENDER_ID="+id)
+			}
+			if tr := SenderTransportFromContext(ctx); tr != "" {
+				env = append(env, "SENDER_TRANSPORT="+tr)
+			}
+			if cid := ConvIDFromContext(ctx); cid != "" {
+				env = append(env, "CONV_ID="+cid)
 			}
 			atts := AttachmentsFromContext(ctx)
 			for paramName, p := range params {
@@ -71,6 +84,13 @@ func NewShell(name, description, script string, params map[string]bot.Param) (ad
 					return shellResult{}, fmt.Errorf("%s: param %q: %w", name, paramName, err)
 				}
 				env = append(env, paramName+"="+s)
+				if p.Type == bot.ParamMarkdown {
+					html, err := markdownToHTML(s)
+					if err != nil {
+						return shellResult{}, fmt.Errorf("%s: param %q: %w", name, paramName, err)
+					}
+					env = append(env, paramName+"_html="+html)
+				}
 			}
 
 			var stdout, stderr bytes.Buffer
@@ -85,7 +105,15 @@ func NewShell(name, description, script string, params map[string]bot.Param) (ad
 			if err != nil {
 				return shellResult{}, fmt.Errorf("%s: %w (stderr: %s)", name, err, stderr.String())
 			}
-			return shellResult{Output: stdout.String()}, nil
+			output := stdout.String()
+			if returns == "markdown" {
+				md, err := htmlToMarkdown(output)
+				if err != nil {
+					return shellResult{}, fmt.Errorf("%s: %w", name, err)
+				}
+				output = md
+			}
+			return shellResult{Output: output}, nil
 		},
 	)
 	if err != nil {
@@ -134,7 +162,7 @@ func buildSchema(params map[string]bot.Param) (*jsonschema.Schema, error) {
 // lenient about JSON type sloppiness (accepts "2" for an integer param, etc.).
 func toEnvString(v any, t bot.ParamType) (string, error) {
 	switch t { //nolint:exhaustive // ParamAttachment is resolved before reaching this helper
-	case bot.ParamString:
+	case bot.ParamString, bot.ParamMarkdown:
 		return envFormatString(v), nil
 	case bot.ParamInteger:
 		return envFormatInteger(v)

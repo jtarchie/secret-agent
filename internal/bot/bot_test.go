@@ -720,6 +720,103 @@ model: claude-sonnet-4-5
 	}
 }
 
+func TestLoadMarkdownParamShorthand(t *testing.T) {
+	p := writeBot(t, `
+name: b
+system: s
+tools:
+  - name: t
+    sh: echo ok
+    params:
+      body: markdown!
+`)
+	b, err := Load(p)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	got := b.Tools[0].Params["body"]
+	if got.Type != ParamMarkdown {
+		t.Errorf("type = %q, want markdown", got.Type)
+	}
+	if !got.Required {
+		t.Error("expected required")
+	}
+}
+
+func TestLoadMarkdownParamRejectsHTMLCompanionCollision(t *testing.T) {
+	p := writeBot(t, `
+name: b
+system: s
+tools:
+  - name: t
+    sh: echo ok
+    params:
+      body: markdown!
+      body_html: string!
+`)
+	_, err := Load(p)
+	if err == nil {
+		t.Fatal("expected collision error")
+	}
+	if !strings.Contains(err.Error(), "body_html") {
+		t.Errorf("error should mention the conflicting companion: %v", err)
+	}
+}
+
+func TestLoadReturnsMarkdownValid(t *testing.T) {
+	p := writeBot(t, `
+name: b
+system: s
+tools:
+  - name: t
+    sh: echo '<h1>hi</h1>'
+    returns: markdown
+`)
+	b, err := Load(p)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if b.Tools[0].Returns != "markdown" {
+		t.Errorf("Returns = %q, want markdown", b.Tools[0].Returns)
+	}
+}
+
+func TestLoadReturnsRejectsUnknownMode(t *testing.T) {
+	p := writeBot(t, `
+name: b
+system: s
+tools:
+  - name: t
+    sh: echo ok
+    returns: json
+`)
+	_, err := Load(p)
+	if err == nil {
+		t.Fatal("expected rejection of returns: json")
+	}
+	if !strings.Contains(err.Error(), "returns") {
+		t.Errorf("error should mention returns: %v", err)
+	}
+}
+
+func TestLoadReturnsRejectsOnExprTool(t *testing.T) {
+	p := writeBot(t, `
+name: b
+system: s
+tools:
+  - name: t
+    expr: 1 + 1
+    returns: markdown
+`)
+	_, err := Load(p)
+	if err == nil {
+		t.Fatal("expected rejection of returns on expr tool")
+	}
+	if !strings.Contains(err.Error(), "sh:") {
+		t.Errorf("error should say only sh: supports returns: %v", err)
+	}
+}
+
 func TestWalkVisitsSubAgents(t *testing.T) {
 	dir := t.TempDir()
 	childPath := filepath.Join(dir, "child.yml")

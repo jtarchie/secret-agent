@@ -196,6 +196,11 @@ type Tool struct {
 	Js          string           `yaml:"js"`
 	Params      map[string]Param `yaml:"params"`
 	Hooks       []Hook           `yaml:"hooks"`
+	// Returns, when set, names a framework-side post-processor applied to
+	// the tool's stdout before the result is handed back to the LLM. The
+	// only value supported in v1 is "markdown": the tool's stdout is
+	// treated as HTML and converted to Markdown. Empty = passthrough.
+	Returns string `yaml:"returns,omitempty"`
 }
 
 type ParamType string
@@ -206,6 +211,10 @@ const (
 	ParamNumber     ParamType = "number"
 	ParamBoolean    ParamType = "boolean"
 	ParamAttachment ParamType = "attachment"
+	// ParamMarkdown is a string-shaped param whose value is raw Markdown.
+	// Shell tools receive both the raw markdown (as $NAME) and a
+	// framework-rendered HTML version (as $NAME_HTML).
+	ParamMarkdown ParamType = "markdown"
 )
 
 type Param struct {
@@ -217,7 +226,7 @@ type Param struct {
 }
 
 var (
-	shorthandRe    = regexp.MustCompile(`^(string|integer|number|boolean|attachment)(!)?(?:=(.*))?$`)
+	shorthandRe    = regexp.MustCompile(`^(string|integer|number|boolean|attachment|markdown)(!)?(?:=(.*))?$`)
 	paramNameRe    = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 	e164Re         = regexp.MustCompile(`^\+[1-9]\d{6,14}$`)
 	slackUserRe    = regexp.MustCompile(`^[UW][A-Z0-9]{2,}$`)
@@ -272,7 +281,7 @@ func (p *Param) parseShorthand(s string) error {
 
 func coerceScalar(s string, t ParamType) (any, error) {
 	switch t {
-	case ParamString:
+	case ParamString, ParamMarkdown:
 		return s, nil
 	case ParamInteger:
 		v, err := strconv.ParseInt(s, 10, 64)
@@ -300,9 +309,9 @@ func coerceScalar(s string, t ParamType) (any, error) {
 
 func (p *Param) validate(toolName, paramName string) error {
 	switch p.Type {
-	case ParamString, ParamInteger, ParamNumber, ParamBoolean, ParamAttachment:
+	case ParamString, ParamInteger, ParamNumber, ParamBoolean, ParamAttachment, ParamMarkdown:
 	default:
-		return fmt.Errorf("tool %q param %q: unknown type %q (want string|integer|number|boolean|attachment)", toolName, paramName, p.Type)
+		return fmt.Errorf("tool %q param %q: unknown type %q (want string|integer|number|boolean|attachment|markdown)", toolName, paramName, p.Type)
 	}
 
 	if !paramNameRe.MatchString(paramName) {
@@ -643,6 +652,30 @@ func loadBot(path string, visited map[string]bool, depth int) (*Bot, error) {
 			if err != nil {
 				return nil, fmt.Errorf("%s: %w", path, err)
 			}
+		}
+		// For every markdown param, reserve the "<name>_html" slot so the
+		// auto-injected rendered-HTML companion never shadows a user param.
+		paramLower := make(map[string]struct{}, len(t.Params))
+		for name := range t.Params {
+			paramLower[strings.ToLower(name)] = struct{}{}
+		}
+		for name, p := range t.Params {
+			if p.Type != ParamMarkdown {
+				continue
+			}
+			collide := strings.ToLower(name) + "_html"
+			if _, exists := paramLower[collide]; exists {
+				return nil, fmt.Errorf("%s: tool %q param %q (markdown): conflicting param %q would shadow the injected HTML companion", path, t.Name, name, collide)
+			}
+		}
+		t.Returns = strings.TrimSpace(t.Returns)
+		switch t.Returns {
+		case "", "markdown":
+		default:
+			return nil, fmt.Errorf("%s: tool %q: returns: %q is not a valid mode (want \"markdown\" or empty)", path, t.Name, t.Returns)
+		}
+		if t.Returns != "" && t.Sh == "" {
+			return nil, fmt.Errorf("%s: tool %q: returns is only supported on sh: tools (not expr or js)", path, t.Name)
 		}
 		for j := range t.Hooks {
 			h := &t.Hooks[j]

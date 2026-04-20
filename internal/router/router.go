@@ -293,7 +293,7 @@ func (r *Router) Dispatch(ctx context.Context, env chat.Envelope, msg chat.Messa
 	)
 
 	handler := selected.Handler(env.ConvID)
-	return handler(tool.WithSenderPhone(ctx, env.SenderPhone), chat.Message{Text: text, Attachments: atts})
+	return handler(tool.WithEnvelope(ctx, env), chat.Message{Text: text, Attachments: atts})
 }
 
 func (r *Router) bufferFor(convID string) *peerBuffer {

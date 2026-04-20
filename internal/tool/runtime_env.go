@@ -13,7 +13,7 @@ import (
 // bindings rather than the stringified forms shell uses.
 func coerceRuntimeValue(v any, t bot.ParamType) (any, error) {
 	switch t { //nolint:exhaustive // ParamAttachment is resolved before reaching this helper
-	case bot.ParamString:
+	case bot.ParamString, bot.ParamMarkdown:
 		return coerceRuntimeString(v), nil
 	case bot.ParamInteger:
 		return coerceRuntimeInteger(v)
