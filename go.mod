@@ -4,6 +4,7 @@ go 1.26.2
 
 require (
 	github.com/achetronic/adk-utils-go v0.13.0
+	github.com/alecthomas/kong v1.15.0
 	github.com/atotto/clipboard v0.1.4
 	github.com/charmbracelet/bubbles v1.0.0
 	github.com/charmbracelet/bubbletea v1.3.10

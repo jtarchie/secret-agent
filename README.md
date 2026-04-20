@@ -280,6 +280,7 @@ prompt.
 | `--config` | — | **Required.** Path to the run config file (bots + transports). |
 | `--base-url` | — | Override provider base URL (e.g. local OpenAI-compatible server). Fallback when a bot does not set its own `base_url:`. |
 | `--skip-preflight` | `false` | Skip model endpoint / API key validation at startup (applied to every unique per-bot endpoint). |
+| `--mcp-preflight-timeout` | `5s` | Per-server timeout for the startup MCP tool-listing probe; `0` disables the deadline. |
 | `--verbose` | `0` | 0=info, 1/2/3=debug with signal-cli `-v` / `-vv` / `-vvv`. |
 
 ### Config file
