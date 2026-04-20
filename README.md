@@ -217,9 +217,12 @@ base_url: http://localhost:11434/v1
 | `description` | string | Shown to the model. |
 | `sh` / `expr` / `js` | string | Implementation — exactly one required. |
 | `params` | map[string]Param | Typed params (see below). |
+| `returns` | enum | `markdown` converts the `sh:` tool's stdout from HTML to Markdown before handing it to the LLM. Omit for passthrough. `sh:` only. |
 | `hooks` | []Hook | Tool-scoped `before`/`after` hooks. |
 
-Param types: `string`, `integer`, `number`, `boolean`, `attachment`. Shorthand: `string!` (required), `integer=5` (default), `boolean=true`. Enums allowed on `string` only. `required` and `default` are mutually exclusive.
+Param types: `string`, `integer`, `number`, `boolean`, `attachment`, `markdown`. Shorthand: `string!` (required), `integer=5` (default), `boolean=true`. Enums allowed on `string` only. `required` and `default` are mutually exclusive. A `markdown` param additionally injects a framework-rendered HTML companion env var named `<param>_html` (sh tools only) so tools feeding Apple Notes, email, etc. don't have to prompt the model into emitting valid HTML.
+
+Every `sh:` tool also receives identity env vars from the transport (when the transport provides them): `$SENDER_ID` (E.164 on Signal, `U…`/`W…` on Slack, empty on CLI), `$SENDER_PHONE` (E.164 on Signal only), `$SENDER_TRANSPORT` (`signal` / `slack` / `cli`), `$CONV_ID` (stable per DM / thread / group). Prefer `$SENDER_ID` over `$SENDER_PHONE` for new bots — `$SENDER_PHONE` is Signal-only and empty on Slack. `expr` and `js` tools see the same four values as top-level bindings (`sender_id`, `sender_phone`, `sender_transport`, `conv_id`). A user-declared param of the same name wins.
 
 ### Agents
 
