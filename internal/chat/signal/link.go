@@ -54,6 +54,7 @@ type LinkConfig struct {
 // finishLink tries to .add() to an immutable list in the jsonRpc
 // dispatcher and fails after the account is saved. The `link` subcommand
 // avoids that dispatcher entirely.
+//
 //nolint:gocognit,cyclop // linear spawn → stdout scan → wait → fallback flow reads clearly top-to-bottom
 func Link(ctx context.Context, cfg LinkConfig) (string, error) {
 	if cfg.StateDir == "" {
