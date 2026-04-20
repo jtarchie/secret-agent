@@ -667,3 +667,79 @@ permissions:
 		t.Fatal("expected error for unknown memory mode")
 	}
 }
+
+func TestLoadModelOverrideFields(t *testing.T) {
+	p := writeBot(t, `
+name: b
+system: s
+model: ollama/llama3
+api_key_env: OLLAMA_KEY
+base_url: http://localhost:11434/v1
+`)
+	b, err := Load(p)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if b.Model != "ollama/llama3" {
+		t.Errorf("Model = %q, want ollama/llama3", b.Model)
+	}
+	if b.APIKeyEnv != "OLLAMA_KEY" {
+		t.Errorf("APIKeyEnv = %q, want OLLAMA_KEY", b.APIKeyEnv)
+	}
+	if b.BaseURL != "http://localhost:11434/v1" {
+		t.Errorf("BaseURL = %q", b.BaseURL)
+	}
+}
+
+func TestLoadModelOverrideOmittedLeavesEmpty(t *testing.T) {
+	p := writeBot(t, `
+name: b
+system: s
+`)
+	b, err := Load(p)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if b.Model != "" || b.APIKeyEnv != "" || b.BaseURL != "" {
+		t.Errorf("expected all override fields empty, got %q/%q/%q", b.Model, b.APIKeyEnv, b.BaseURL)
+	}
+}
+
+func TestLoadModelRejectsMissingProvider(t *testing.T) {
+	p := writeBot(t, `
+name: b
+system: s
+model: claude-sonnet-4-5
+`)
+	_, err := Load(p)
+	if err == nil {
+		t.Fatal("expected error for model without provider prefix")
+	}
+	if !strings.Contains(err.Error(), "provider/model-name") {
+		t.Errorf("error should hint at provider/model-name form: %v", err)
+	}
+}
+
+func TestWalkVisitsSubAgents(t *testing.T) {
+	dir := t.TempDir()
+	childPath := filepath.Join(dir, "child.yml")
+	err := os.WriteFile(childPath, []byte("name: c\nsystem: s\n"), 0o600)
+	if err != nil {
+		t.Fatalf("write child: %v", err)
+	}
+	parentPath := filepath.Join(dir, "parent.yml")
+	parentYAML := "name: p\nsystem: s\nagents:\n  helper:\n    file: child.yml\n"
+	err = os.WriteFile(parentPath, []byte(parentYAML), 0o600)
+	if err != nil {
+		t.Fatalf("write parent: %v", err)
+	}
+	b, err := Load(parentPath)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	var names []string
+	Walk(b, func(bb *Bot) { names = append(names, bb.Name) })
+	if len(names) != 2 || names[0] != "p" || names[1] != "c" {
+		t.Errorf("Walk order = %v, want [p c]", names)
+	}
+}

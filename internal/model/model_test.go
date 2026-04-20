@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/jtarchie/secret-agent/internal/bot"
 )
 
 func TestPreflightOpenAIOK(t *testing.T) {
@@ -92,5 +94,76 @@ func TestPreflightUnknownProvider(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "unknown provider") {
 		t.Errorf("error = %v, want 'unknown provider'", err)
+	}
+}
+
+func TestResolveForBotNoOverrideReusesGlobal(t *testing.T) {
+	globalLLM, err := Resolve("anthropic", "claude-sonnet-4-5", "global-key", "")
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	b := &bot.Bot{Name: "b"}
+	got, prov, key, base, err := ResolveForBot(b, globalLLM, "anthropic", "claude-sonnet-4-5", "global-key", "https://g")
+	if err != nil {
+		t.Fatalf("ResolveForBot: %v", err)
+	}
+	if got != globalLLM {
+		t.Error("expected identical LLM pointer on fast path")
+	}
+	if prov != "anthropic" || key != "global-key" || base != "https://g" {
+		t.Errorf("tuple = (%q,%q,%q)", prov, key, base)
+	}
+}
+
+func TestResolveForBotSameProviderInheritsKeyAndBaseURL(t *testing.T) {
+	globalLLM, _ := Resolve("anthropic", "claude-sonnet-4-5", "global-key", "")
+	b := &bot.Bot{Name: "b", Model: "anthropic/claude-haiku-4-5"}
+	_, prov, key, base, err := ResolveForBot(b, globalLLM, "anthropic", "claude-sonnet-4-5", "global-key", "https://g")
+	if err != nil {
+		t.Fatalf("ResolveForBot: %v", err)
+	}
+	if prov != "anthropic" || key != "global-key" || base != "https://g" {
+		t.Errorf("tuple = (%q,%q,%q), want same-provider inheritance of key and base", prov, key, base)
+	}
+}
+
+func TestResolveForBotCrossProviderClearsBaseURL(t *testing.T) {
+	globalLLM, _ := Resolve("anthropic", "claude-sonnet-4-5", "global-key", "")
+	b := &bot.Bot{Name: "b", Model: "ollama/llama3"}
+	_, prov, _, base, err := ResolveForBot(b, globalLLM, "anthropic", "claude-sonnet-4-5", "global-key", "https://g")
+	if err != nil {
+		t.Fatalf("ResolveForBot: %v", err)
+	}
+	if prov != "ollama" {
+		t.Errorf("provider = %q, want ollama", prov)
+	}
+	if base != "" {
+		t.Errorf("baseURL = %q, want empty (let Resolve derive default)", base)
+	}
+}
+
+func TestResolveForBotAPIKeyEnvMissing(t *testing.T) {
+	t.Setenv("BOT_TEST_KEY_MISSING", "")
+	globalLLM, _ := Resolve("anthropic", "claude-sonnet-4-5", "global-key", "")
+	b := &bot.Bot{Name: "b", Model: "openrouter/anthropic/claude-sonnet-4-5", APIKeyEnv: "BOT_TEST_KEY_MISSING"}
+	_, _, _, _, err := ResolveForBot(b, globalLLM, "anthropic", "claude-sonnet-4-5", "global-key", "")
+	if err == nil {
+		t.Fatal("expected error when api_key_env is empty")
+	}
+	if !strings.Contains(err.Error(), "BOT_TEST_KEY_MISSING") {
+		t.Errorf("error should name the env var: %v", err)
+	}
+}
+
+func TestResolveForBotAPIKeyEnvPresent(t *testing.T) {
+	t.Setenv("BOT_TEST_KEY_OK", "sk-bot")
+	globalLLM, _ := Resolve("anthropic", "claude-sonnet-4-5", "global-key", "")
+	b := &bot.Bot{Name: "b", Model: "openrouter/anthropic/claude-sonnet-4-5", APIKeyEnv: "BOT_TEST_KEY_OK"}
+	_, prov, key, _, err := ResolveForBot(b, globalLLM, "anthropic", "claude-sonnet-4-5", "global-key", "")
+	if err != nil {
+		t.Fatalf("ResolveForBot: %v", err)
+	}
+	if prov != "openrouter" || key != "sk-bot" {
+		t.Errorf("tuple = (%q,%q), want openrouter/sk-bot", prov, key)
 	}
 }

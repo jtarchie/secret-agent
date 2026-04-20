@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	adkmodel "google.golang.org/adk/model"
+
 	"github.com/jtarchie/secret-agent/internal/bot"
 	"github.com/jtarchie/secret-agent/internal/chat"
 )
@@ -362,3 +364,60 @@ mcp:
 		t.Fatal("got nil runtime")
 	}
 }
+
+func TestModelResolverCalledPerBotInTree(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	childPath := filepath.Join(dir, "child.yml")
+	err := os.WriteFile(childPath, []byte("name: child\nsystem: s\n"), 0o600)
+	if err != nil {
+		t.Fatalf("write child: %v", err)
+	}
+	parentPath := filepath.Join(dir, "parent.yml")
+	parentYAML := "name: parent\nsystem: s\nagents:\n  helper:\n    file: child.yml\n"
+	err = os.WriteFile(parentPath, []byte(parentYAML), 0o600)
+	if err != nil {
+		t.Fatalf("write parent: %v", err)
+	}
+	b, err := bot.Load(parentPath)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+
+	seen := map[string]int{}
+	resolver := func(bb *bot.Bot) (adkmodel.LLM, error) {
+		seen[bb.Name]++
+		return stubLLM{}, nil
+	}
+	_, err = New(ctx, b, stubLLM{}, WithModelResolver(resolver))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if seen["parent"] != 1 || seen["child"] != 1 {
+		t.Errorf("resolver call counts = %v, want parent=1 child=1", seen)
+	}
+}
+
+func TestModelResolverErrorPropagates(t *testing.T) {
+	ctx := context.Background()
+	b := writeBot(t, `
+name: b
+system: s
+`)
+	resolver := func(*bot.Bot) (adkmodel.LLM, error) {
+		return nil, errResolver
+	}
+	_, err := New(ctx, b, stubLLM{}, WithModelResolver(resolver))
+	if err == nil {
+		t.Fatal("expected resolver error to propagate")
+	}
+	if !strings.Contains(err.Error(), "resolve model") {
+		t.Errorf("error = %v, want to mention 'resolve model'", err)
+	}
+}
+
+var errResolver = resolverErr("boom")
+
+type resolverErr string
+
+func (e resolverErr) Error() string { return string(e) }

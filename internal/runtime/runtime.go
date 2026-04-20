@@ -45,6 +45,7 @@ type Option func(*options)
 
 type options struct {
 	recorder ToolRecorder
+	resolver ModelResolver
 }
 
 // WithToolRecorder attaches a callback that fires after every tool call on
@@ -52,6 +53,18 @@ type options struct {
 // (the callback cannot mutate args or results).
 func WithToolRecorder(fn ToolRecorder) Option {
 	return func(o *options) { o.recorder = fn }
+}
+
+// ModelResolver returns the LLM to use for a given bot. Called once per bot
+// in the tree (top-level and every sub-agent). The returned LLM is used for
+// that bot's llmagent and is also threaded down as the inherited default
+// for any of its sub-agents that do not resolve their own override.
+type ModelResolver func(*bot.Bot) (adkmodel.LLM, error)
+
+// WithModelResolver installs a per-bot model resolver. Without it, every
+// bot in the tree uses the LLM passed to New.
+func WithModelResolver(r ModelResolver) Option {
+	return func(o *options) { o.resolver = r }
 }
 
 type Runtime struct {
@@ -83,7 +96,7 @@ func New(ctx context.Context, b *bot.Bot, llm adkmodel.LLM, opts ...Option) (*Ru
 	}
 
 	_ = ctx // reserved for future use; setup performs no I/O that needs cancellation
-	bld := &builder{recorder: cfg.recorder}
+	bld := &builder{recorder: cfg.recorder, resolver: cfg.resolver}
 	//nolint:contextcheck // buildAgent is pure wiring — no I/O to cancel, so ctx is intentionally not threaded through
 	root, err := bld.buildAgent(b.Name, fmt.Sprintf("YAML-defined bot %q", b.Name), b, llm, true)
 	if err != nil {
@@ -116,6 +129,7 @@ func New(ctx context.Context, b *bot.Bot, llm adkmodel.LLM, opts ...Option) (*Ru
 type builder struct {
 	probes   []mcpProbe
 	recorder ToolRecorder
+	resolver ModelResolver
 }
 
 // buildAgent constructs an ADK llmagent for a bot, recursively wrapping each
@@ -124,8 +138,20 @@ type builder struct {
 // keys and descriptions drive what the parent LLM sees. isRoot is true only
 // for the top-level call so eval recorders fire once per turn at the outer
 // boundary rather than once per sub-agent level.
+//
 //nolint:cyclop // sequential wiring of MCP toolsets, tools, sub-agents, hooks, and recorders reads clearly top-to-bottom
 func (bld *builder) buildAgent(name, description string, b *bot.Bot, llm adkmodel.LLM, isRoot bool) (agent.Agent, error) {
+	effective := llm
+	if bld.resolver != nil {
+		got, err := bld.resolver(b)
+		if err != nil {
+			return nil, fmt.Errorf("resolve model for %q: %w", b.Name, err)
+		}
+		if got != nil {
+			effective = got
+		}
+	}
+
 	toolsets := make([]adktool.Toolset, 0, len(b.MCP))
 	for _, m := range b.MCP {
 		ts, err := tool.NewMCP(m)
@@ -163,7 +189,7 @@ func (bld *builder) buildAgent(name, description string, b *bot.Bot, llm adkmode
 		if childDesc == "" {
 			childDesc = fmt.Sprintf("Sub-agent %q", key)
 		}
-		child, err := bld.buildAgent(key, childDesc, ref.Bot, llm, false)
+		child, err := bld.buildAgent(key, childDesc, ref.Bot, effective, false)
 		if err != nil {
 			return nil, fmt.Errorf("agent %q: %w", key, err)
 		}
@@ -197,7 +223,7 @@ func (bld *builder) buildAgent(name, description string, b *bot.Bot, llm adkmode
 	built, err := llmagent.New(llmagent.Config{
 		Name:                 name,
 		Description:          description,
-		Model:                llm,
+		Model:                effective,
 		Instruction:          b.System,
 		Tools:                tools,
 		Toolsets:             toolsets,
@@ -268,6 +294,7 @@ func (r *Runtime) PreflightMCP(ctx context.Context, timeout time.Duration) error
 // The underlying ADK session is created lazily (in-memory) on first use.
 // In stateless mode each turn gets its own session ID so no history
 // accumulates across turns.
+//
 //nolint:gocognit // the per-conv streaming handler keeps session setup, cancellation, and event pumping in one place
 func (r *Runtime) HandlerFor(convID string) func(context.Context, chat.Message) <-chan chat.Chunk {
 	return func(ctx context.Context, userMsg chat.Message) <-chan chat.Chunk {

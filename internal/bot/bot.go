@@ -31,6 +31,15 @@ type Bot struct {
 	Hooks         []Hook              `yaml:"hooks"`
 	MCP           []MCPServer         `yaml:"mcp,omitempty"`
 	Tests         []TestCase          `yaml:"tests,omitempty"`
+
+	// Per-bot model override. All three fields are optional; unset fields
+	// fall back to the global --model / --api-key / --base-url CLI flags.
+	// base_url is optional even when model is set — for supported providers
+	// (anthropic, openai, openrouter, ollama) it is derived from the
+	// provider prefix.
+	Model     string `yaml:"model,omitempty"`
+	APIKeyEnv string `yaml:"api_key_env,omitempty"`
+	BaseURL   string `yaml:"base_url,omitempty"`
 }
 
 // TestCase is one declarative eval. The runner sends Input as a single user
@@ -484,12 +493,21 @@ func loadBot(path string, visited map[string]bool, depth int) (*Bot, error) {
 
 	b.Name = strings.TrimSpace(b.Name)
 	b.System = strings.TrimSpace(b.System)
+	b.Model = strings.TrimSpace(b.Model)
+	b.APIKeyEnv = strings.TrimSpace(b.APIKeyEnv)
+	b.BaseURL = strings.TrimSpace(b.BaseURL)
 
 	if b.Name == "" {
 		return nil, fmt.Errorf("%s: name is required", path)
 	}
 	if b.System == "" {
 		return nil, fmt.Errorf("%s: system is required", path)
+	}
+	if b.Model != "" {
+		idx := strings.Index(b.Model, "/")
+		if idx <= 0 || strings.TrimSpace(b.Model[:idx]) == "" {
+			return nil, fmt.Errorf("%s: model: %q must be in the form provider/model-name", path, b.Model)
+		}
 	}
 
 	switch b.Permissions.Memory {
@@ -716,4 +734,17 @@ func loadBot(path string, visited map[string]bool, depth int) (*Bot, error) {
 	}
 
 	return &b, nil
+}
+
+// Walk invokes fn on b and every sub-agent reachable via b.Agents, in
+// pre-order (parent before children). It is safe to call fn multiple times
+// in the tree; callers that need per-bot uniqueness should dedupe themselves.
+func Walk(b *Bot, fn func(*Bot)) {
+	if b == nil {
+		return
+	}
+	fn(b)
+	for _, ref := range b.Agents {
+		Walk(ref.Bot, fn)
+	}
 }

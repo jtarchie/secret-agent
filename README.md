@@ -181,6 +181,26 @@ See [examples/](examples/) for runnable configs. Full field reference below.
 | `hooks` | []Hook | no | Bot-level callbacks (before/after model, tool, agent). |
 | `mcp` | []MCPServer | no | External MCP servers to expose. |
 | `tests` | []TestCase | no | Declarative eval cases — see *Evaluation*. |
+| `model` | string | no | Per-bot model override (`provider/model-name`). Unset = global `--model`. Also honored on sub-agent YAMLs. |
+| `api_key_env` | string | no | Env var name holding the API key for this bot. Unset = global `--api-key`. Never inline the key. |
+| `base_url` | string | no | Per-bot base URL. Unset = derived from the provider prefix (for `anthropic|openai|openrouter|ollama`) or the global `--base-url` when the provider matches. |
+
+Per-bot model fields are all optional and fall back field-by-field to the CLI flags, so a YAML that sets only `model:` keeps the global API key and base URL. Example — a config with one global-model bot and one local-Ollama bot:
+
+```yaml
+# bots/triage.yml — inherits the global --model
+name: triage
+system: "Route the user to the right expert."
+```
+
+```yaml
+# bots/local.yml — pins its own model + key + base URL
+name: local
+system: "You answer offline, from a local model."
+model: ollama/llama3
+api_key_env: OLLAMA_API_KEY   # env-var indirection, same pattern as Slack tokens
+base_url: http://localhost:11434/v1
+```
 
 ### Permissions
 
@@ -255,11 +275,11 @@ prompt.
 
 | Flag | Default | Purpose |
 |---|---|---|
-| `--model` | — | **Required.** `provider/model-name` (e.g. `anthropic/claude-sonnet-4-5-20250929`). |
-| `--api-key` | — | **Required.** Model provider API key. |
+| `--model` | — | **Required.** `provider/model-name` (e.g. `anthropic/claude-sonnet-4-5-20250929`). Fallback when a bot does not set its own `model:`. |
+| `--api-key` | — | **Required.** Model provider API key. Fallback when a bot does not set its own `api_key_env:`. |
 | `--config` | — | **Required.** Path to the run config file (bots + transports). |
-| `--base-url` | — | Override provider base URL (e.g. local OpenAI-compatible server). |
-| `--skip-preflight` | `false` | Skip model endpoint / API key validation at startup. |
+| `--base-url` | — | Override provider base URL (e.g. local OpenAI-compatible server). Fallback when a bot does not set its own `base_url:`. |
+| `--skip-preflight` | `false` | Skip model endpoint / API key validation at startup (applied to every unique per-bot endpoint). |
 | `--verbose` | `0` | 0=info, 1/2/3=debug with signal-cli `-v` / `-vv` / `-vvv`. |
 
 ### Config file
@@ -284,9 +304,9 @@ Runs every case in the bot's `tests:` block as a single fresh-session turn, scor
 
 | Flag | Default | Purpose |
 |---|---|---|
-| `--model` | — | **Required.** `provider/model-name`. |
-| `--api-key` | — | **Required.** Model provider API key. |
-| `--base-url` | — | Override provider base URL. |
+| `--model` | — | **Required.** `provider/model-name`. Fallback when the bot does not set its own `model:`. |
+| `--api-key` | — | **Required.** Model provider API key. Fallback when the bot does not set its own `api_key_env:`. |
+| `--base-url` | — | Override provider base URL. Fallback when the bot does not set its own `base_url:`. |
 | `--skip-preflight` | `false` | Skip the startup model-endpoint check. |
 | `--verbose` | `false` | Also print observed tool trajectory and final text for passing cases. |
 

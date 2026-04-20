@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"golang.org/x/sync/errgroup"
+	adkmodel "google.golang.org/adk/model"
 
 	"github.com/jtarchie/secret-agent/internal/bot"
 	"github.com/jtarchie/secret-agent/internal/chat"
@@ -72,7 +73,7 @@ func run(args []string) error {
 	}
 }
 
-//nolint:cyclop // the flag-parse → config-load → bot-wire → transport-wire flow is sequential and clearer as one function
+//nolint:cyclop,gocognit // the flag-parse → config-load → bot-wire → transport-wire flow is sequential and clearer as one function
 func runRun(args []string) error {
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
@@ -107,19 +108,10 @@ func runRun(args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	if !*skipPreflightFlag {
-		preflightCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-		err := model.Preflight(preflightCtx, provider, *keyFlag, *baseURLFlag)
-		cancel()
-		if err != nil {
-			return fmt.Errorf("model preflight failed (use --skip-preflight to bypass): %w", err)
-		}
-	}
-
 	logger := newLogger(*verboseFlag)
 
 	configDir := filepath.Dir(*configFlag)
-	routes := make([]router.Route, 0, len(cfg.Bots))
+	topBots := make([]*bot.Bot, 0, len(cfg.Bots))
 	for _, p := range cfg.Bots {
 		if !filepath.IsAbs(p) {
 			p = filepath.Join(configDir, p)
@@ -128,7 +120,58 @@ func runRun(args []string) error {
 		if err != nil {
 			return fmt.Errorf("load bot %s: %w", p, err)
 		}
-		rt, err := runtime.New(ctx, b, llm)
+		topBots = append(topBots, b)
+	}
+
+	// Resolve an LLM per bot (top-level + every sub-agent) with per-bot
+	// overrides falling back to the global flags. Memoize by bot pointer so
+	// the preflight walk and the runtime resolver share one resolution.
+	type endpoint struct{ provider, apiKey, baseURL string }
+	llmCache := map[*bot.Bot]adkmodel.LLM{}
+	endpoints := map[endpoint]struct{}{}
+	for _, b := range topBots {
+		var walkErr error
+		bot.Walk(b, func(bb *bot.Bot) {
+			if walkErr != nil {
+				return
+			}
+			if _, ok := llmCache[bb]; ok {
+				return
+			}
+			botLLM, prov, key, base, err := model.ResolveForBot(bb, llm, provider, name, *keyFlag, *baseURLFlag)
+			if err != nil {
+				walkErr = err
+				return
+			}
+			llmCache[bb] = botLLM
+			endpoints[endpoint{prov, key, base}] = struct{}{}
+		})
+		if walkErr != nil {
+			return fmt.Errorf("resolve model: %w", walkErr)
+		}
+	}
+
+	if !*skipPreflightFlag {
+		for ep := range endpoints {
+			preflightCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+			err := model.Preflight(preflightCtx, ep.provider, ep.apiKey, ep.baseURL)
+			cancel()
+			if err != nil {
+				return fmt.Errorf("model preflight failed (use --skip-preflight to bypass): %w", err)
+			}
+		}
+	}
+
+	resolver := func(bb *bot.Bot) (adkmodel.LLM, error) {
+		if got, ok := llmCache[bb]; ok {
+			return got, nil
+		}
+		return llm, nil
+	}
+
+	routes := make([]router.Route, 0, len(topBots))
+	for _, b := range topBots {
+		rt, err := runtime.New(ctx, b, llm, runtime.WithModelResolver(resolver))
 		if err != nil {
 			return fmt.Errorf("runtime for bot %q: %w", b.Name, err)
 		}

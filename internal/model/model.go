@@ -6,10 +6,12 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 
 	genaianthropic "github.com/achetronic/adk-utils-go/genai/anthropic"
 	genaiopenai "github.com/achetronic/adk-utils-go/genai/openai"
+	"github.com/jtarchie/secret-agent/internal/bot"
 	adkmodel "google.golang.org/adk/model"
 )
 
@@ -55,6 +57,52 @@ func Resolve(provider, name, apiKey, baseURL string) (adkmodel.LLM, error) {
 			ModelName: name,
 		}), nil
 	}
+}
+
+// ResolveForBot returns globalLLM when b declares no per-bot override.
+// Otherwise it builds a bot-specific LLM, falling back to global values
+// field-by-field. It also returns the effective (provider, apiKey, baseURL)
+// tuple so callers can preflight each unique endpoint exactly once.
+//
+// baseURL handling:
+//   - If b.BaseURL is set, it is used verbatim.
+//   - Else if the effective provider matches globalProvider, globalBaseURL
+//     is carried forward (preserving a user-supplied --base-url).
+//   - Else "" is returned so Resolve falls back to DefaultBaseURLs[provider].
+func ResolveForBot(
+	b *bot.Bot, globalLLM adkmodel.LLM,
+	globalProvider, globalName, globalKey, globalBaseURL string,
+) (adkmodel.LLM, string, string, string, error) {
+	if b.Model == "" && b.APIKeyEnv == "" && b.BaseURL == "" {
+		return globalLLM, globalProvider, globalKey, globalBaseURL, nil
+	}
+
+	provider, name := globalProvider, globalName
+	if b.Model != "" {
+		provider, name = SplitModel(b.Model)
+	}
+
+	apiKey := globalKey
+	if b.APIKeyEnv != "" {
+		apiKey = os.Getenv(b.APIKeyEnv)
+		if apiKey == "" {
+			return nil, "", "", "", fmt.Errorf("bot %q: $%s is empty", b.Name, b.APIKeyEnv)
+		}
+	}
+
+	baseURL := ""
+	switch {
+	case b.BaseURL != "":
+		baseURL = b.BaseURL
+	case provider == globalProvider:
+		baseURL = globalBaseURL
+	}
+
+	llm, err := Resolve(provider, name, apiKey, baseURL)
+	if err != nil {
+		return nil, "", "", "", fmt.Errorf("bot %q: %w", b.Name, err)
+	}
+	return llm, provider, apiKey, baseURL, nil
 }
 
 // AnthropicDefaultBaseURL is the default Anthropic API base URL.
