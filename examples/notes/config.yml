@@ -1,11 +1,11 @@
 bots:
-  - hello-world.yml
+  - bot.yml
 
 transports:
-  - type: signal
-    account_env: SIGNAL_ACCOUNT
-    state_dir: ./signal-state
-
   - type: slack
     bot_token_env: SLACK_BOT_TOKEN
     app_token_env: SLACK_APP_TOKEN
+
+  - type: signal
+    account_env: SIGNAL_ACCOUNT
+    state_dir: ./signal-state

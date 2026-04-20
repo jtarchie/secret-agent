@@ -1,0 +1,264 @@
+name: notes_bot
+system: |
+  You capture notes into Apple Notes for the current user. You are decisive:
+  when the user gives you something to save, you save it — you do not ask for
+  clarification on details you can reasonably infer. You do ask for
+  clarification when the user's intent is genuinely ambiguous (e.g. "@note"
+  with no other content).
+
+  You have two save flows. The framework handles both:
+
+    1. DM freeform. The user may DM you several un-triggered messages. Those
+       are buffered for you automatically and prepended to the next triggered
+       turn as prior context. When the user finally says something like
+       "@note save" or "@note save as X", treat the prior messages plus the
+       current one as the note source.
+
+    2. Channel thread save. When @-mentioned in a channel or thread, treat the
+       visible message (plus any prior buffered context from that thread) as
+       the note source.
+
+  Save pipeline — do ALL of these every time you save:
+
+    a. Folder. Choose one from the allowlist based on content:
+         - "1:1s"     — one-on-one meetings or conversations about a person
+         - "Meetings" — group meetings, standups, retros, reviews
+         - "Ideas"    — product / design / strategy ideas, brainstorms
+         - "Journal"  — personal reflections, daily notes
+         - "Inbox"    — default / unclear
+       If unsure, use "Inbox". Do not invent new folder names.
+
+    b. Title. ≤70 characters, specific and searchable. For meetings or 1:1s,
+       start with today's ISO date (call `today` first) — e.g.
+       "2026-04-19 1:1 Jamie". For ideas and journal entries, a concise
+       descriptive phrase.
+
+    c. Body. Rewrite the raw input into clean HTML suitable for Apple Notes
+       (Notes stores body as HTML). Structure:
+         - Optional one-sentence summary paragraph: <p>…</p>
+         - Bulleted notes: <ul><li>…</li></ul>
+         - If the raw input implies any TODOs, follow-ups, or "I need to…"
+           items, include an <h2>Action Items</h2> section followed by a
+           <ul> of them.
+       Escape &, <, > in user-supplied text (use &amp;, &lt;, &gt;). Do NOT
+       wrap the body in <html> or <body> tags. Do NOT duplicate the title
+       inside the body.
+
+    d. Call `save_note` with title, body, folder.
+
+    e. Acknowledge concisely: "Saved to <folder> → <title>." Nothing else.
+
+  Recall pipeline:
+
+    - "find my notes about X", "what did I save on Y", etc. → call
+      `search_notes` with a short query. Show the caller the first handful
+      of results (title + folder, one per line).
+    - "open <title>" or "show me <title>" → call `read_note` with the title
+      (and folder if known), then echo the body back as plain text.
+    - If they ask what folders exist → call `list_folders`.
+
+  Rules:
+    - Never output HTML to the user in chat. HTML is for the note body only.
+    - Never call `save_note` with an empty body. If the prior buffer is empty
+      and the current message has no content beyond "@note save", ask the
+      user what to save.
+    - Never ask for the folder — pick it.
+
+triggers:
+  - "@note"
+
+permissions:
+  attachments: false
+  memory: full
+
+tools:
+  - name: today
+    description: |
+      Return today's date as an ISO YYYY-MM-DD string. Call this whenever you
+      need to date a note title (meetings, 1:1s, journal entries).
+    sh: |
+      date +%Y-%m-%d
+
+  - name: save_note
+    description: |
+      Create a new note in Apple Notes with the given title, HTML body, and
+      folder. The folder is created on first use if it does not already
+      exist. Returns the title and folder on success.
+    params:
+      title: string!
+      body: string!
+      folder: string=Inbox
+    sh: |
+      # Idempotent folder create — apple-notes-cli exits non-zero if the
+      # folder exists; swallow that. Wrapped so we still bail on real errors
+      # like missing binary or denied Automation permission.
+      if ! command -v apple-notes-cli >/dev/null 2>&1; then
+        echo "error: apple-notes-cli not found on PATH"
+        exit 1
+      fi
+      apple-notes-cli add-folder "$folder" >/dev/null 2>&1 || true
+
+      # Create the note via AppleScript. We pass title/body/folder as argv so
+      # we do not have to escape them into an inline AppleScript string. The
+      # LLM is instructed to emit HTML-ready body text; we pass it through
+      # unchanged.
+      osascript - "$title" "$body" "$folder" <<'APPLESCRIPT'
+      on run argv
+        set theTitle to item 1 of argv
+        set theBody to item 2 of argv
+        set theFolder to item 3 of argv
+        tell application "Notes"
+          set folderObj to missing value
+          repeat with f in folders
+            if (name of f as string) is theFolder then
+              set folderObj to f
+              exit repeat
+            end if
+          end repeat
+          if folderObj is missing value then
+            set folderObj to make new folder with properties {name:theFolder}
+          end if
+          make new note at folderObj with properties {name:theTitle, body:theBody}
+        end tell
+      end run
+      APPLESCRIPT
+      status=$?
+      if [ $status -ne 0 ]; then
+        echo "error: osascript exit $status — check Automation permission for Notes"
+        exit $status
+      fi
+      echo "saved: $title ($folder)"
+
+  - name: list_folders
+    description: |
+      List every folder in Apple Notes. Use this when the user asks what
+      folders exist or when you need to pick a folder and want to verify
+      your allowlist matches reality.
+    sh: |
+      osascript -e 'tell application "Notes" to get name of every folder' \
+        | tr ',' '\n' \
+        | sed 's/^ *//'
+
+  - name: search_notes
+    description: |
+      Find notes whose title contains the query (case-insensitive). Returns
+      up to 25 matches, one per line, formatted as "title | folder". Use
+      when the user wants to recall an existing note. Does not read bodies.
+    params:
+      query: string!
+    sh: |
+      osascript - "$query" <<'APPLESCRIPT'
+      on run argv
+        set q to item 1 of argv
+        set lq to do shell script "printf %s " & quoted form of q & " | tr '[:upper:]' '[:lower:]'"
+        set matches to {}
+        set cap to 25
+        tell application "Notes"
+          repeat with n in notes
+            if (count of matches) ≥ cap then exit repeat
+            try
+              set nm to name of n as string
+              set lnm to do shell script "printf %s " & quoted form of nm & " | tr '[:upper:]' '[:lower:]'"
+              if lnm contains lq then
+                set fn to name of (container of n) as string
+                set end of matches to nm & " | " & fn
+              end if
+            end try
+          end repeat
+        end tell
+        set AppleScript's text item delimiters to linefeed
+        set out to matches as string
+        set AppleScript's text item delimiters to ""
+        return out
+      end run
+      APPLESCRIPT
+
+  - name: read_note
+    description: |
+      Return the plaintext body of the first note matching the given title
+      (case-insensitive exact match preferred, then substring match). If
+      folder is provided the search is restricted to that folder.
+    params:
+      title: string!
+      folder: string=
+    sh: |
+      osascript - "$title" "$folder" <<'APPLESCRIPT'
+      on run argv
+        set wantTitle to item 1 of argv
+        set wantFolder to item 2 of argv
+        set lwant to do shell script "printf %s " & quoted form of wantTitle & " | tr '[:upper:]' '[:lower:]'"
+        set found to missing value
+        tell application "Notes"
+          repeat with n in notes
+            try
+              set nm to name of n as string
+              set fn to name of (container of n) as string
+              set lnm to do shell script "printf %s " & quoted form of nm & " | tr '[:upper:]' '[:lower:]'"
+              if wantFolder is not "" and fn is not wantFolder then
+                -- skip: folder filter active and mismatched
+              else if lnm is lwant then
+                set found to n
+                exit repeat
+              else if found is missing value and lnm contains lwant then
+                set found to n
+              end if
+            end try
+          end repeat
+          if found is missing value then
+            return "not found"
+          end if
+          return plaintext of found
+        end tell
+      end run
+      APPLESCRIPT
+
+# Declarative eval cases. Run with:
+#   ./secret-agent eval --model "$MODEL" --api-key "$API_KEY" \
+#     examples/notes/bot.yml
+# Tool calls are captured, not executed — evals do NOT touch Apple Notes.
+tests:
+  - name: saves_to_inbox_by_default
+    input: "@note save: random thought about caching"
+    expect:
+      tool_calls:
+        - name: save_note
+          args:
+            folder: "Inbox"
+      final_output:
+        contains: ["Inbox"]
+
+  - name: routes_1on1_to_1on1s_folder
+    input: "@note save my 1:1 with Jamie — wants more ownership of billing; worried about Q2 bandwidth"
+    expect:
+      tool_calls:
+        - name: today
+        - name: save_note
+          args:
+            folder: "1:1s"
+      final_output:
+        contains: ["1:1s"]
+
+  - name: extracts_action_items
+    input: "@note save: reviewed design doc. todo: email Sam about the schema. todo: schedule follow-up with Priya."
+    expect:
+      tool_calls:
+        - name: save_note
+      final_output:
+        contains: ["saved", "Inbox"]
+        not_contains: ["error"]
+
+  - name: searches_existing_notes
+    input: "@note find my notes about billing"
+    expect:
+      tool_calls:
+        - name: search_notes
+          args:
+            query: "billing"
+
+  - name: reads_a_specific_note
+    input: "@note open my note titled Q2 Planning"
+    expect:
+      tool_calls:
+        - name: read_note
+          args:
+            title: "Q2 Planning"

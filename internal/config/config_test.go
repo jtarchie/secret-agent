@@ -179,6 +179,77 @@ transports:
 	}
 }
 
+func TestLoadSignalResolvesAccountEnv(t *testing.T) {
+	t.Setenv("TEST_SIGNAL_ACCOUNT", "+15551234567")
+	p := write(t, `
+bots: [b.yml]
+transports:
+  - type: signal
+    account_env: TEST_SIGNAL_ACCOUNT
+    state_dir: /tmp/s
+`)
+	cfg, err := Load(p)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.Transports[0].Account != "+15551234567" {
+		t.Errorf("account_env not resolved: %+v", cfg.Transports[0])
+	}
+}
+
+func TestLoadSignalRejectsBothAccountForms(t *testing.T) {
+	t.Setenv("TEST_SIGNAL_ACCOUNT", "+15551234567")
+	p := write(t, `
+bots: [b.yml]
+transports:
+  - type: signal
+    account: "+15557654321"
+    account_env: TEST_SIGNAL_ACCOUNT
+    state_dir: /tmp/s
+`)
+	_, err := Load(p)
+	if err == nil {
+		t.Fatal("expected rejection when both account and account_env set")
+	}
+	if !strings.Contains(err.Error(), "only one of account or account_env") {
+		t.Errorf("error should name the conflict: %v", err)
+	}
+}
+
+func TestLoadSignalRejectsEmptyAccountEnv(t *testing.T) {
+	t.Setenv("NEVER_SET_ACCOUNT", "")
+	p := write(t, `
+bots: [b.yml]
+transports:
+  - type: signal
+    account_env: NEVER_SET_ACCOUNT
+    state_dir: /tmp/s
+`)
+	_, err := Load(p)
+	if err == nil {
+		t.Fatal("expected empty-env error")
+	}
+	if !strings.Contains(err.Error(), "NEVER_SET_ACCOUNT") {
+		t.Errorf("error should name the missing env var: %v", err)
+	}
+}
+
+func TestLoadSignalRejectsNeitherAccountForm(t *testing.T) {
+	p := write(t, `
+bots: [b.yml]
+transports:
+  - type: signal
+    state_dir: /tmp/s
+`)
+	_, err := Load(p)
+	if err == nil {
+		t.Fatal("expected missing-account error")
+	}
+	if !strings.Contains(err.Error(), "account") {
+		t.Errorf("error should mention account: %v", err)
+	}
+}
+
 func TestLoadRejectsSignalMissingFields(t *testing.T) {
 	p := write(t, `
 bots: [b.yml]

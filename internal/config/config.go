@@ -34,11 +34,14 @@ const (
 type Transport struct {
 	Type TransportType `yaml:"type"`
 
-	// Signal fields.
-	Account  string `yaml:"account,omitempty"`
-	StateDir string `yaml:"state_dir,omitempty"`
-	Command  string `yaml:"command,omitempty"`
-	Verbose  int    `yaml:"verbose,omitempty"`
+	// Signal fields. Exactly one of Account or AccountEnv must be set; the
+	// env form mirrors Slack's bot_token_env pattern so the E.164 number can
+	// live outside the repo.
+	Account    string `yaml:"account,omitempty"`
+	AccountEnv string `yaml:"account_env,omitempty"`
+	StateDir   string `yaml:"state_dir,omitempty"`
+	Command    string `yaml:"command,omitempty"`
+	Verbose    int    `yaml:"verbose,omitempty"`
 
 	// Slack fields. Secrets must be supplied via env var indirection.
 	BotTokenEnv string `yaml:"bot_token_env,omitempty"`
@@ -104,10 +107,20 @@ func normalizeTransport(t *Transport, i int, path string) error {
 	switch t.Type {
 	case TransportSignal:
 		t.Account = strings.TrimSpace(t.Account)
+		t.AccountEnv = strings.TrimSpace(t.AccountEnv)
 		t.StateDir = strings.TrimSpace(t.StateDir)
 		t.Command = strings.TrimSpace(t.Command)
-		if t.Account == "" {
-			return fmt.Errorf("%s: transports[%d] (signal): account is required", path, i)
+		switch {
+		case t.Account != "" && t.AccountEnv != "":
+			return fmt.Errorf("%s: transports[%d] (signal): only one of account or account_env may be set", path, i)
+		case t.Account == "" && t.AccountEnv == "":
+			return fmt.Errorf("%s: transports[%d] (signal): exactly one of account or account_env is required", path, i)
+		case t.AccountEnv != "":
+			v := os.Getenv(t.AccountEnv)
+			if v == "" {
+				return fmt.Errorf("%s: transports[%d] (signal): $%s is empty", path, i, t.AccountEnv)
+			}
+			t.Account = v
 		}
 		if t.StateDir == "" {
 			return fmt.Errorf("%s: transports[%d] (signal): state_dir is required", path, i)

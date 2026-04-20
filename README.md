@@ -290,7 +290,7 @@ bots:
   - examples/hello-world.yml           # relative paths resolve to the config dir
 transports:
   - type: signal
-    account: "+15551234567"
+    account: "+15551234567"            # or account_env: SIGNAL_ACCOUNT (mutually exclusive)
     state_dir: ./signal-state
     command: signal-cli                # optional; defaults to "signal-cli"
   - type: slack
