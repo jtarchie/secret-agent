@@ -49,6 +49,12 @@ type Transport struct {
 	// Resolved secrets, populated by Load. Not read from YAML.
 	BotToken string `yaml:"-"`
 	AppToken string `yaml:"-"`
+
+	// MessagePrefix is prepended verbatim to every outgoing reply (including
+	// error bodies). Mainly useful on Signal, where bot messages are otherwise
+	// indistinguishable from a human's. Preserved as-is — no trimming — so a
+	// trailing space or newline in the configured value is kept.
+	MessagePrefix string `yaml:"message_prefix,omitempty"`
 }
 
 // Load reads the config file at path and validates it. Env-var indirection

@@ -23,11 +23,12 @@ import (
 // Routing (trigger matching, scope filters, prior-message buffering, and
 // per-bot attachment policy) lives in the dispatcher (see internal/router).
 type Transport struct {
-	command  string
-	account  string
-	stateDir string
-	verbose  int
-	logger   *slog.Logger
+	command       string
+	account       string
+	stateDir      string
+	verbose       int
+	messagePrefix string
+	logger        *slog.Logger
 
 	// outbound tracks message bodies we recently sent, keyed by body. Used
 	// to suppress sync.sentMessage echoes of our own Note-to-Self replies.
@@ -49,6 +50,13 @@ func WithLogger(l *slog.Logger) Option { return func(t *Transport) { t.logger = 
 // WithVerbose passes `-v` (verbose=1) or `-vv` (verbose=2) to signal-cli,
 // raising its log level from WARN (the default) to INFO or DEBUG.
 func WithVerbose(n int) Option { return func(t *Transport) { t.verbose = n } }
+
+// WithMessagePrefix prepends a literal string to every outgoing body
+// (including "error: ..." replies). Useful on Signal, where messages
+// otherwise look identical to ones sent by a human.
+func WithMessagePrefix(p string) Option {
+	return func(t *Transport) { t.messagePrefix = p }
+}
 
 // New creates a Signal transport. account is the linked-device phone number
 // (E.164); stateDir is the signal-cli state directory.
@@ -354,6 +362,10 @@ func (t *Transport) handleDM(
 			"chunks", chunkCount,
 			"duration", dur,
 		)
+	}
+
+	if t.messagePrefix != "" {
+		body = t.messagePrefix + body
 	}
 
 	peerLock.Lock()

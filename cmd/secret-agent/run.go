@@ -161,25 +161,31 @@ func buildTransports(cfg *config.Config, logger *slog.Logger, routes []router.Ro
 			if len(routes) > 1 {
 				return nil, fmt.Errorf("transport cli requires exactly one bot (got %d)", len(routes))
 			}
-			out = append(out, cli.New(cli.WithBotName(routes[0].Bot.Name)))
+			opts := []cli.Option{cli.WithBotName(routes[0].Bot.Name)}
+			if t.MessagePrefix != "" {
+				opts = append(opts, cli.WithMessagePrefix(t.MessagePrefix))
+			}
+			out = append(out, cli.New(opts...))
 		case config.TransportSignal:
 			cmd := t.Command
 			if cmd == "" {
 				cmd = "signal-cli"
 			}
-			out = append(out, signaltransport.New(
-				t.Account,
-				t.StateDir,
+			opts := []signaltransport.Option{
 				signaltransport.WithCommand(cmd),
 				signaltransport.WithLogger(logger),
 				signaltransport.WithVerbose(verbose),
-			))
+			}
+			if t.MessagePrefix != "" {
+				opts = append(opts, signaltransport.WithMessagePrefix(t.MessagePrefix))
+			}
+			out = append(out, signaltransport.New(t.Account, t.StateDir, opts...))
 		case config.TransportSlack:
-			out = append(out, slacktransport.New(
-				t.BotToken,
-				t.AppToken,
-				slacktransport.WithLogger(logger),
-			))
+			opts := []slacktransport.Option{slacktransport.WithLogger(logger)}
+			if t.MessagePrefix != "" {
+				opts = append(opts, slacktransport.WithMessagePrefix(t.MessagePrefix))
+			}
+			out = append(out, slacktransport.New(t.BotToken, t.AppToken, opts...))
 		default:
 			return nil, fmt.Errorf("unknown transport type %q", t.Type)
 		}

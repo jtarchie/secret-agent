@@ -20,8 +20,9 @@ import (
 )
 
 type Transport struct {
-	markdown bool
-	botName  string
+	markdown      bool
+	botName       string
+	messagePrefix string
 }
 
 type Option func(*Transport)
@@ -34,6 +35,13 @@ func WithMarkdown(on bool) Option {
 // Defaults to "bot" when unset.
 func WithBotName(name string) Option {
 	return func(t *Transport) { t.botName = name }
+}
+
+// WithMessagePrefix prepends a literal string to every non-empty bot reply
+// streamed into the TUI. Offered for parity with Signal/Slack; the TUI
+// already shows a bot-name label, so this is often redundant here.
+func WithMessagePrefix(p string) Option {
+	return func(t *Transport) { t.messagePrefix = p }
 }
 
 func New(opts ...Option) *Transport {
@@ -54,7 +62,7 @@ func (t *Transport) Run(ctx context.Context, d chat.Dispatcher) error {
 		return d.Dispatch(ctx, chat.Envelope{ConvID: "local", Kind: "cli", Transport: "cli"}, msg)
 	})
 	prog := tea.NewProgram(
-		newModel(ctx, t.botName, handler, t.markdown),
+		newModel(ctx, t.botName, t.messagePrefix, handler, t.markdown),
 		tea.WithAltScreen(),
 	)
 	// Shut the TUI down when a sibling transport cancels ctx. Without this,
@@ -115,15 +123,16 @@ var keys = keyMap{
 
 type model struct {
 	//nolint:containedctx // bubbletea's Model interface has no way to thread ctx through Update; handler invocations need the original request ctx
-	ctx      context.Context
-	botName  string
-	handler  handlerFunc
-	history  []string
-	viewport viewport.Model
-	input    textarea.Model
-	waiting  bool
-	width    int
-	height   int
+	ctx           context.Context
+	botName       string
+	messagePrefix string
+	handler       handlerFunc
+	history       []string
+	viewport      viewport.Model
+	input         textarea.Model
+	waiting       bool
+	width         int
+	height        int
 
 	stream       <-chan chat.Chunk
 	cancel       context.CancelFunc
@@ -146,7 +155,7 @@ type model struct {
 	statusStyle lipgloss.Style
 }
 
-func newModel(ctx context.Context, botName string, h handlerFunc, markdown bool) *model {
+func newModel(ctx context.Context, botName, messagePrefix string, h handlerFunc, markdown bool) *model {
 	ta := textarea.New()
 	ta.Placeholder = "Type a message (enter to send, alt+enter for newline)..."
 	ta.Focus()
@@ -164,19 +173,20 @@ func newModel(ctx context.Context, botName string, h handlerFunc, markdown bool)
 	hp := help.New()
 
 	return &model{
-		ctx:         ctx,
-		botName:     botName,
-		handler:     h,
-		viewport:    vp,
-		input:       ta,
-		replyIdx:    -1,
-		spinner:     sp,
-		help:        hp,
-		markdown:    markdown,
-		userStyle:   lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("6")),
-		botStyle:    lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("5")),
-		errorStyle:  lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("9")),
-		statusStyle: statusStyle,
+		ctx:           ctx,
+		botName:       botName,
+		messagePrefix: messagePrefix,
+		handler:       h,
+		viewport:      vp,
+		input:         ta,
+		replyIdx:      -1,
+		spinner:       sp,
+		help:          hp,
+		markdown:      markdown,
+		userStyle:     lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("6")),
+		botStyle:      lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("5")),
+		errorStyle:    lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("9")),
+		statusStyle:   statusStyle,
 	}
 }
 
@@ -309,6 +319,9 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.hadError = true
 			m.refreshViewport()
 			return m, waitForChunk(m.stream)
+		}
+		if m.replyBuf.Len() == 0 && m.messagePrefix != "" && msg.Delta != "" {
+			m.replyBuf.WriteString(m.messagePrefix)
 		}
 		m.replyBuf.WriteString(msg.Delta)
 		m.history[m.replyIdx] = m.botStyle.Render(m.botName) + ": " + m.replyBuf.String()

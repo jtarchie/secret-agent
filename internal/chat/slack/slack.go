@@ -29,10 +29,11 @@ import (
 
 // Transport is a chat.Transport backed by a slack-go Socket Mode client.
 type Transport struct {
-	botToken   string
-	appToken   string
-	logger     *slog.Logger
-	httpClient *http.Client
+	botToken      string
+	appToken      string
+	messagePrefix string
+	logger        *slog.Logger
+	httpClient    *http.Client
 	// fileDownloadTimeout bounds each attachment download. Slack file URLs
 	// are small by default (~a few MB); 60s is a generous ceiling.
 	fileDownloadTimeout time.Duration
@@ -47,6 +48,13 @@ func WithLogger(l *slog.Logger) Option { return func(t *Transport) { t.logger = 
 // Mainly useful in tests.
 func WithHTTPClient(c *http.Client) Option {
 	return func(t *Transport) { t.httpClient = c }
+}
+
+// WithMessagePrefix prepends a literal string to every outgoing body
+// (including "error: ..." replies). Slack already badges bot messages, so
+// this is mostly offered for parity with Signal.
+func WithMessagePrefix(p string) Option {
+	return func(t *Transport) { t.messagePrefix = p }
 }
 
 // New returns a Slack transport. botToken is the bot user OAuth token
@@ -254,6 +262,10 @@ func (t *Transport) handleMessage(
 		return
 	} else {
 		peerLog.Info("handler done", "bytes_out", len(body), "chunks", chunkCount, "duration", dur)
+	}
+
+	if t.messagePrefix != "" {
+		body = t.messagePrefix + body
 	}
 
 	mu := lockFor(ev.Channel)

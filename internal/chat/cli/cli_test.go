@@ -22,7 +22,12 @@ func nopHandler(_ context.Context, _ chat.Message) <-chan chat.Chunk {
 // slot in history with replyIdx pointing at it.
 func primeModelForReply(t *testing.T) *model {
 	t.Helper()
-	m := newModel(context.Background(), "bot", nopHandler, false)
+	return primeModelWithPrefix(t, "")
+}
+
+func primeModelWithPrefix(t *testing.T, prefix string) *model {
+	t.Helper()
+	m := newModel(context.Background(), "bot", prefix, nopHandler, false)
 	m.history = append(m.history, "you: hi", m.thinkingLine())
 	m.replyIdx = len(m.history) - 1
 	m.waiting = true
@@ -63,5 +68,29 @@ func TestReplyTextSurvivesStreamDone(t *testing.T) {
 	joined := strings.Join(m.history, "\n")
 	if !strings.Contains(joined, "hello") {
 		t.Fatalf("reply text was stripped; history=%q", joined)
+	}
+}
+
+func TestMessagePrefixAppearsOnceAtStartOfReply(t *testing.T) {
+	m := primeModelWithPrefix(t, "[bot] ")
+
+	m.Update(chunkMsg(chat.Chunk{Delta: "hel"}))
+	m.Update(chunkMsg(chat.Chunk{Delta: "lo"}))
+	m.Update(streamDoneMsg{})
+
+	if m.lastReply != "[bot] hello" {
+		t.Fatalf("want prefix prepended once; got %q", m.lastReply)
+	}
+}
+
+func TestMessagePrefixSkippedWhenReplyIsEmpty(t *testing.T) {
+	m := primeModelWithPrefix(t, "[bot] ")
+
+	m.Update(streamDoneMsg{})
+
+	for _, line := range m.history {
+		if strings.Contains(line, "[bot]") {
+			t.Fatalf("prefix leaked into UI for empty reply; history=%q", m.history)
+		}
 	}
 }

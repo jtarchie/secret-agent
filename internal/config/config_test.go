@@ -250,6 +250,32 @@ transports:
 	}
 }
 
+func TestLoadMessagePrefix(t *testing.T) {
+	t.Setenv("TEST_BOT", "xoxb-secret")
+	t.Setenv("TEST_APP", "xapp-secret")
+	p := write(t, `
+bots: [b.yml]
+transports:
+  - type: signal
+    account: "+15551234567"
+    state_dir: /tmp/s
+    message_prefix: "[bot] "
+  - type: slack
+    bot_token_env: TEST_BOT
+    app_token_env: TEST_APP
+`)
+	cfg, err := Load(p)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if got, want := cfg.Transports[0].MessagePrefix, "[bot] "; got != want {
+		t.Errorf("signal prefix: got %q, want %q (trailing space must be preserved)", got, want)
+	}
+	if got := cfg.Transports[1].MessagePrefix; got != "" {
+		t.Errorf("slack prefix: got %q, want empty (omitted field)", got)
+	}
+}
+
 func TestLoadRejectsSignalMissingFields(t *testing.T) {
 	p := write(t, `
 bots: [b.yml]
