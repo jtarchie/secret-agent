@@ -112,48 +112,57 @@ func Load(path string) (*Config, error) {
 func normalizeTransport(t *Transport, i int, path string) error {
 	switch t.Type {
 	case TransportSignal:
-		t.Account = strings.TrimSpace(t.Account)
-		t.AccountEnv = strings.TrimSpace(t.AccountEnv)
-		t.StateDir = strings.TrimSpace(t.StateDir)
-		t.Command = strings.TrimSpace(t.Command)
-		switch {
-		case t.Account != "" && t.AccountEnv != "":
-			return fmt.Errorf("%s: transports[%d] (signal): only one of account or account_env may be set", path, i)
-		case t.Account == "" && t.AccountEnv == "":
-			return fmt.Errorf("%s: transports[%d] (signal): exactly one of account or account_env is required", path, i)
-		case t.AccountEnv != "":
-			v := os.Getenv(t.AccountEnv)
-			if v == "" {
-				return fmt.Errorf("%s: transports[%d] (signal): $%s is empty", path, i, t.AccountEnv)
-			}
-			t.Account = v
-		}
-		if t.StateDir == "" {
-			return fmt.Errorf("%s: transports[%d] (signal): state_dir is required", path, i)
-		}
+		return normalizeSignal(t, i, path)
 	case TransportSlack:
-		t.BotTokenEnv = strings.TrimSpace(t.BotTokenEnv)
-		t.AppTokenEnv = strings.TrimSpace(t.AppTokenEnv)
-		if t.BotTokenEnv == "" {
-			return fmt.Errorf("%s: transports[%d] (slack): bot_token_env is required", path, i)
-		}
-		if t.AppTokenEnv == "" {
-			return fmt.Errorf("%s: transports[%d] (slack): app_token_env is required", path, i)
-		}
-		bot := os.Getenv(t.BotTokenEnv)
-		if bot == "" {
-			return fmt.Errorf("%s: transports[%d] (slack): $%s is empty", path, i, t.BotTokenEnv)
-		}
-		app := os.Getenv(t.AppTokenEnv)
-		if app == "" {
-			return fmt.Errorf("%s: transports[%d] (slack): $%s is empty", path, i, t.AppTokenEnv)
-		}
-		t.BotToken = bot
-		t.AppToken = app
+		return normalizeSlack(t, i, path)
 	case TransportCLI:
-		// CLI has no required fields.
+		return nil
 	default:
 		return fmt.Errorf("%s: transports[%d]: unknown type %q (want signal|slack|cli)", path, i, t.Type)
 	}
+}
+
+func normalizeSignal(t *Transport, i int, path string) error {
+	t.Account = strings.TrimSpace(t.Account)
+	t.AccountEnv = strings.TrimSpace(t.AccountEnv)
+	t.StateDir = strings.TrimSpace(t.StateDir)
+	t.Command = strings.TrimSpace(t.Command)
+	switch {
+	case t.Account != "" && t.AccountEnv != "":
+		return fmt.Errorf("%s: transports[%d] (signal): only one of account or account_env may be set", path, i)
+	case t.Account == "" && t.AccountEnv == "":
+		return fmt.Errorf("%s: transports[%d] (signal): exactly one of account or account_env is required", path, i)
+	case t.AccountEnv != "":
+		v := os.Getenv(t.AccountEnv)
+		if v == "" {
+			return fmt.Errorf("%s: transports[%d] (signal): $%s is empty", path, i, t.AccountEnv)
+		}
+		t.Account = v
+	}
+	if t.StateDir == "" {
+		return fmt.Errorf("%s: transports[%d] (signal): state_dir is required", path, i)
+	}
+	return nil
+}
+
+func normalizeSlack(t *Transport, i int, path string) error {
+	t.BotTokenEnv = strings.TrimSpace(t.BotTokenEnv)
+	t.AppTokenEnv = strings.TrimSpace(t.AppTokenEnv)
+	if t.BotTokenEnv == "" {
+		return fmt.Errorf("%s: transports[%d] (slack): bot_token_env is required", path, i)
+	}
+	if t.AppTokenEnv == "" {
+		return fmt.Errorf("%s: transports[%d] (slack): app_token_env is required", path, i)
+	}
+	bot := os.Getenv(t.BotTokenEnv)
+	if bot == "" {
+		return fmt.Errorf("%s: transports[%d] (slack): $%s is empty", path, i, t.BotTokenEnv)
+	}
+	app := os.Getenv(t.AppTokenEnv)
+	if app == "" {
+		return fmt.Errorf("%s: transports[%d] (slack): $%s is empty", path, i, t.AppTokenEnv)
+	}
+	t.BotToken = bot
+	t.AppToken = app
 	return nil
 }

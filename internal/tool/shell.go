@@ -17,6 +17,7 @@ import (
 	"mvdan.cc/sh/v3/syntax"
 
 	"github.com/jtarchie/secret-agent/internal/bot"
+	"github.com/jtarchie/secret-agent/internal/chat"
 )
 
 type shellResult struct {
@@ -48,70 +49,17 @@ func NewShell(name, description, script string, params map[string]bot.Param, ret
 			InputSchema: schema,
 		},
 		func(ctx adktool.Context, args map[string]any) (shellResult, error) {
-			env := os.Environ()
-			if phone := SenderPhoneFromContext(ctx); phone != "" {
-				env = append(env, "SENDER_PHONE="+phone)
-			}
-			if id := SenderIDFromContext(ctx); id != "" {
-				env = append(env, "SENDER_ID="+id)
-			}
-			if tr := SenderTransportFromContext(ctx); tr != "" {
-				env = append(env, "SENDER_TRANSPORT="+tr)
-			}
-			if cid := ConvIDFromContext(ctx); cid != "" {
-				env = append(env, "CONV_ID="+cid)
-			}
-			atts := AttachmentsFromContext(ctx)
-			for paramName, p := range params {
-				value, ok := args[paramName]
-				if !ok || value == nil {
-					if p.Default != nil {
-						value = p.Default
-					} else {
-						continue
-					}
-				}
-				var (
-					s   string
-					err error
-				)
-				if p.Type == bot.ParamAttachment {
-					s, err = resolveAttachment(value, atts)
-				} else {
-					s, err = toEnvString(value, p.Type)
-				}
-				if err != nil {
-					return shellResult{}, fmt.Errorf("%s: param %q: %w", name, paramName, err)
-				}
-				env = append(env, paramName+"="+s)
-				if p.Type == bot.ParamMarkdown {
-					html, err := markdownToHTML(s)
-					if err != nil {
-						return shellResult{}, fmt.Errorf("%s: param %q: %w", name, paramName, err)
-					}
-					env = append(env, paramName+"_html="+html)
-				}
-			}
-
-			var stdout, stderr bytes.Buffer
-			runner, err := interp.New(
-				interp.Env(expand.ListEnviron(env...)),
-				interp.StdIO(nil, &stdout, &stderr),
-			)
+			env, err := buildShellEnv(ctx, args, params, name)
 			if err != nil {
-				return shellResult{}, fmt.Errorf("%s: %w", name, err)
+				return shellResult{}, err
 			}
-			err = runner.Run(ctx, file)
+			output, err := runShellScript(ctx, file, env, name)
 			if err != nil {
-				return shellResult{}, fmt.Errorf("%s: %w (stderr: %s)", name, err, stderr.String())
+				return shellResult{}, err
 			}
-			output := stdout.String()
-			if returns == "markdown" {
-				md, err := htmlToMarkdown(output)
-				if err != nil {
-					return shellResult{}, fmt.Errorf("%s: %w", name, err)
-				}
-				output = md
+			output, err = postProcessShellOutput(output, returns, name)
+			if err != nil {
+				return shellResult{}, err
 			}
 			return shellResult{Output: output}, nil
 		},
@@ -120,6 +68,98 @@ func NewShell(name, description, script string, params map[string]bot.Param, ret
 		return nil, fmt.Errorf("new shell tool: %w", err)
 	}
 	return tool, nil
+}
+
+// buildShellEnv assembles the env var slice for a shell tool invocation:
+// inherited process env, per-turn sender/conv identity, and param values.
+func buildShellEnv(ctx adktool.Context, args map[string]any, params map[string]bot.Param, name string) ([]string, error) {
+	env := os.Environ()
+	if phone := SenderPhoneFromContext(ctx); phone != "" {
+		env = append(env, "SENDER_PHONE="+phone)
+	}
+	if id := SenderIDFromContext(ctx); id != "" {
+		env = append(env, "SENDER_ID="+id)
+	}
+	if tr := SenderTransportFromContext(ctx); tr != "" {
+		env = append(env, "SENDER_TRANSPORT="+tr)
+	}
+	if cid := ConvIDFromContext(ctx); cid != "" {
+		env = append(env, "CONV_ID="+cid)
+	}
+	atts := AttachmentsFromContext(ctx)
+	for paramName, p := range params {
+		entries, err := paramEnvEntries(paramName, p, args, atts, name)
+		if err != nil {
+			return nil, err
+		}
+		env = append(env, entries...)
+	}
+	return env, nil
+}
+
+// paramEnvEntries returns the env var assignments for a single declared
+// param. Attachment params resolve against the turn's attachments;
+// markdown params also emit a companion <name>_html entry.
+func paramEnvEntries(paramName string, p bot.Param, args map[string]any, atts []chat.Attachment, name string) ([]string, error) {
+	value, ok := args[paramName]
+	if !ok || value == nil {
+		if p.Default == nil {
+			return nil, nil
+		}
+		value = p.Default
+	}
+	var (
+		s   string
+		err error
+	)
+	if p.Type == bot.ParamAttachment {
+		s, err = resolveAttachment(value, atts)
+	} else {
+		s, err = toEnvString(value, p.Type)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("%s: param %q: %w", name, paramName, err)
+	}
+	out := []string{paramName + "=" + s}
+	if p.Type == bot.ParamMarkdown {
+		html, err := markdownToHTML(s)
+		if err != nil {
+			return nil, fmt.Errorf("%s: param %q: %w", name, paramName, err)
+		}
+		out = append(out, paramName+"_html="+html)
+	}
+	return out, nil
+}
+
+// runShellScript executes a parsed shell AST under mvdan.cc/sh with the
+// supplied env and returns captured stdout.
+func runShellScript(ctx adktool.Context, file *syntax.File, env []string, name string) (string, error) {
+	var stdout, stderr bytes.Buffer
+	runner, err := interp.New(
+		interp.Env(expand.ListEnviron(env...)),
+		interp.StdIO(nil, &stdout, &stderr),
+	)
+	if err != nil {
+		return "", fmt.Errorf("%s: %w", name, err)
+	}
+	err = runner.Run(ctx, file)
+	if err != nil {
+		return "", fmt.Errorf("%s: %w (stderr: %s)", name, err, stderr.String())
+	}
+	return stdout.String(), nil
+}
+
+// postProcessShellOutput applies the optional `returns:` transform to raw
+// stdout. Empty = passthrough; "markdown" converts HTML to Markdown.
+func postProcessShellOutput(output, returns, name string) (string, error) {
+	if returns != "markdown" {
+		return output, nil
+	}
+	md, err := htmlToMarkdown(output)
+	if err != nil {
+		return "", fmt.Errorf("%s: %w", name, err)
+	}
+	return md, nil
 }
 
 func buildSchema(params map[string]bot.Param) (*jsonschema.Schema, error) {
