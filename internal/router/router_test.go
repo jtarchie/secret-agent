@@ -330,6 +330,8 @@ func TestScopeMatchesByTransport(t *testing.T) {
 		Groups:        []string{"signal-group-A"},
 		SlackUsers:    []string{"U11111"},
 		SlackChannels: []string{"C11111"},
+		IMessageUsers: []string{"+15551111111", "person@icloud.com"},
+		IMessageChats: []string{"iMessage;+;chat111"},
 	}
 	rt, err := RouteFromBot(b, (&recordingHandler{}).factory())
 	if err != nil {
@@ -356,6 +358,14 @@ func TestScopeMatchesByTransport(t *testing.T) {
 		{"cli always matches", chat.Envelope{Transport: "cli", Kind: "cli"}, true},
 		{"slack ignores signal scope fields", chat.Envelope{Transport: "slack", Kind: "dm", SenderPhone: "+15551111111"}, false},
 		{"signal ignores slack scope fields", chat.Envelope{Transport: "signal", Kind: "dm", SenderID: "U11111"}, false},
+		{"imessage dm phone in scope", chat.Envelope{Transport: "imessage", Kind: "dm", SenderID: "+15551111111"}, true},
+		{"imessage dm email in scope", chat.Envelope{Transport: "imessage", Kind: "dm", SenderID: "person@icloud.com"}, true},
+		{"imessage dm out of scope", chat.Envelope{Transport: "imessage", Kind: "dm", SenderID: "+15559999999"}, false},
+		{"imessage group in scope", chat.Envelope{Transport: "imessage", Kind: "group", GroupID: "iMessage;+;chat111", SenderID: "+15551111111"}, true},
+		{"imessage group wrong chat", chat.Envelope{Transport: "imessage", Kind: "group", GroupID: "iMessage;+;chat999", SenderID: "+15551111111"}, false},
+		{"imessage group wrong user", chat.Envelope{Transport: "imessage", Kind: "group", GroupID: "iMessage;+;chat111", SenderID: "+15559999999"}, false},
+		{"imessage ignores signal scope fields", chat.Envelope{Transport: "imessage", Kind: "dm", SenderPhone: "+15551111111"}, false},
+		{"imessage ignores slack scope fields", chat.Envelope{Transport: "imessage", Kind: "dm", SenderID: "U11111"}, false},
 	}
 
 	for _, tc := range cases {
@@ -376,6 +386,8 @@ func TestScopeMatchesEmptyScopeMatchesAll(t *testing.T) {
 		{Transport: "signal", Kind: "dm", SenderPhone: "+15559999999"},
 		{Transport: "slack", Kind: "dm", SenderID: "U99999"},
 		{Transport: "slack", Kind: "group", GroupID: "C99999", SenderID: "U99999"},
+		{Transport: "imessage", Kind: "dm", SenderID: "+15559999999"},
+		{Transport: "imessage", Kind: "group", GroupID: "iMessage;+;chatX", SenderID: "person@icloud.com"},
 	}
 	for _, env := range envs {
 		if !rt.scopeMatches(env) {

@@ -1,7 +1,7 @@
 // Package config parses the secret-agent run configuration: the list of
 // bot YAML paths to serve and the list of chat transports (Signal, Slack,
-// or CLI) to pump messages through. A single Config instance is the
-// source of truth passed to cmd/secret-agent.
+// iMessage, or CLI) to pump messages through. A single Config instance is
+// the source of truth passed to cmd/secret-agent.
 package config
 
 import (
@@ -25,9 +25,10 @@ type Config struct {
 type TransportType string
 
 const (
-	TransportSignal TransportType = "signal"
-	TransportSlack  TransportType = "slack"
-	TransportCLI    TransportType = "cli"
+	TransportSignal   TransportType = "signal"
+	TransportSlack    TransportType = "slack"
+	TransportIMessage TransportType = "imessage"
+	TransportCLI      TransportType = "cli"
 )
 
 // Transport is a single transport stanza in the config file.
@@ -49,6 +50,17 @@ type Transport struct {
 	// Resolved secrets, populated by Load. Not read from YAML.
 	BotToken string `yaml:"-"`
 	AppToken string `yaml:"-"`
+
+	// iMessage fields (backed by a BlueBubbles Server). The server password
+	// must be supplied via env var indirection like Slack's tokens.
+	ServerURL      string `yaml:"server_url,omitempty"`
+	PasswordEnv    string `yaml:"password_env,omitempty"`
+	Password       string `yaml:"-"`
+	// WebhookListen is the host:port our HTTP listener binds to; BlueBubbles
+	// Server must be configured to POST to http://<this addr><webhook_path>.
+	// Optional; defaults are chosen by the transport.
+	WebhookListen  string `yaml:"webhook_listen,omitempty"`
+	WebhookPath    string `yaml:"webhook_path,omitempty"`
 
 	// MessagePrefix is prepended verbatim to every outgoing reply (including
 	// error bodies). Mainly useful on Signal, where bot messages are otherwise
@@ -115,10 +127,12 @@ func normalizeTransport(t *Transport, i int, path string) error {
 		return normalizeSignal(t, i, path)
 	case TransportSlack:
 		return normalizeSlack(t, i, path)
+	case TransportIMessage:
+		return normalizeIMessage(t, i, path)
 	case TransportCLI:
 		return nil
 	default:
-		return fmt.Errorf("%s: transports[%d]: unknown type %q (want signal|slack|cli)", path, i, t.Type)
+		return fmt.Errorf("%s: transports[%d]: unknown type %q (want signal|slack|imessage|cli)", path, i, t.Type)
 	}
 }
 
@@ -142,6 +156,29 @@ func normalizeSignal(t *Transport, i int, path string) error {
 	if t.StateDir == "" {
 		return fmt.Errorf("%s: transports[%d] (signal): state_dir is required", path, i)
 	}
+	return nil
+}
+
+func normalizeIMessage(t *Transport, i int, path string) error {
+	t.ServerURL = strings.TrimSpace(t.ServerURL)
+	t.PasswordEnv = strings.TrimSpace(t.PasswordEnv)
+	t.StateDir = strings.TrimSpace(t.StateDir)
+	t.WebhookListen = strings.TrimSpace(t.WebhookListen)
+	t.WebhookPath = strings.TrimSpace(t.WebhookPath)
+	if t.ServerURL == "" {
+		return fmt.Errorf("%s: transports[%d] (imessage): server_url is required", path, i)
+	}
+	if t.PasswordEnv == "" {
+		return fmt.Errorf("%s: transports[%d] (imessage): password_env is required", path, i)
+	}
+	if t.StateDir == "" {
+		return fmt.Errorf("%s: transports[%d] (imessage): state_dir is required", path, i)
+	}
+	pw := os.Getenv(t.PasswordEnv)
+	if pw == "" {
+		return fmt.Errorf("%s: transports[%d] (imessage): $%s is empty", path, i, t.PasswordEnv)
+	}
+	t.Password = pw
 	return nil
 }
 

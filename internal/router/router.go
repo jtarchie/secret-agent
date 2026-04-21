@@ -36,6 +36,8 @@ type Route struct {
 	groups        map[string]struct{}
 	slackUsers    map[string]struct{}
 	slackChannels map[string]struct{}
+	imessageUsers map[string]struct{}
+	imessageChats map[string]struct{}
 	attachmentsOK bool
 	bufferingOn   bool
 }
@@ -64,6 +66,14 @@ func RouteFromBot(b *bot.Bot, h HandlerFactory) (Route, error) {
 	for _, c := range b.SlackChannels {
 		slackChannels[c] = struct{}{}
 	}
+	imessageUsers := make(map[string]struct{}, len(b.IMessageUsers))
+	for _, u := range b.IMessageUsers {
+		imessageUsers[u] = struct{}{}
+	}
+	imessageChats := make(map[string]struct{}, len(b.IMessageChats))
+	for _, c := range b.IMessageChats {
+		imessageChats[c] = struct{}{}
+	}
 
 	return Route{
 		Bot:           b,
@@ -73,6 +83,8 @@ func RouteFromBot(b *bot.Bot, h HandlerFactory) (Route, error) {
 		groups:        groups,
 		slackUsers:    slackUsers,
 		slackChannels: slackChannels,
+		imessageUsers: imessageUsers,
+		imessageChats: imessageChats,
 		attachmentsOK: b.Permissions.AttachmentsAllowed(),
 		bufferingOn:   b.Permissions.MemoryOrDefault() == bot.MemoryFull,
 	}, nil
@@ -161,6 +173,7 @@ func closedChan() <-chan chat.Chunk {
 //
 //	"signal" (or "") → users + groups, keyed on SenderPhone / GroupID
 //	"slack"          → slackUsers + slackChannels, keyed on SenderID / GroupID
+//	"imessage"       → imessageUsers + imessageChats, keyed on SenderID / GroupID
 //	"cli"            → always matches (CLI has no identity scoping)
 func (rt *Route) scopeMatches(env chat.Envelope) bool {
 	if env.Transport == "cli" {
@@ -168,8 +181,11 @@ func (rt *Route) scopeMatches(env chat.Envelope) bool {
 	}
 
 	users, groups, senderKey := rt.users, rt.groups, env.SenderPhone
-	if env.Transport == "slack" {
+	switch env.Transport {
+	case "slack":
 		users, groups, senderKey = rt.slackUsers, rt.slackChannels, env.SenderID
+	case "imessage":
+		users, groups, senderKey = rt.imessageUsers, rt.imessageChats, env.SenderID
 	}
 
 	if env.Kind == "group" {

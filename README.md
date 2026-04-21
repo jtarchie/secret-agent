@@ -162,6 +162,57 @@ with `type: attachment` (see `file_info` in [examples/hello-world.yml](examples/
 receive the resolved path as an env var — the model picks the attachment
 by index (`"0"`) or filename.
 
+## Getting Started — iMessage (macOS)
+
+iMessage support is provided by bridging through [BlueBubbles Server](https://bluebubbles.app),
+an open-source macOS app that exposes iMessage over a REST + webhook API.
+secret-agent receives new messages via an HTTP webhook and sends replies
+via the BlueBubbles REST endpoint.
+
+### 1. Install and configure BlueBubbles Server
+
+1. Install the server app from https://bluebubbles.app and grant it the
+   permissions it asks for (Full Disk Access, Accessibility, Automation
+   for Messages). It needs them to read and write iMessage state.
+2. Set a server password in the app's settings — this is your
+   `BLUEBUBBLES_PASSWORD`.
+3. In the app's **Webhooks** tab, register
+   `http://127.0.0.1:4321/imessage-webhook` for the `new-message` event.
+   (This URL must match `webhook_listen` + `webhook_path` in your
+   secret-agent config.)
+
+### 2. Scope the bot
+
+Add `imessage_users:` and/or `imessage_chats:` alongside the existing
+scope fields in a bot YAML. iMessage handles are either E.164 phone
+numbers (`+15551234567`) or Apple-ID emails (`person@icloud.com`);
+chat GUIDs look like `iMessage;+;chat123…` for groups and
+`any;-;+15551234567` for DMs.
+
+### 3. Run
+
+```yaml
+bots:
+  - examples/hello-world.yml
+transports:
+  - type: imessage
+    server_url: http://localhost:1234
+    password_env: BLUEBUBBLES_PASSWORD
+    state_dir: ./imessage-state
+    webhook_listen: 127.0.0.1:4321
+    webhook_path: /imessage-webhook
+    message_prefix: "🤖 "
+```
+
+```sh
+BLUEBUBBLES_PASSWORD=… \
+  ./secret-agent run --config config.yml --model … --api-key …
+```
+
+Inbound attachments are downloaded under `state_dir/attachments/<msg-guid>/`
+and surfaced to the bot via the same `chat.Attachment` contract used by
+Signal and Slack.
+
 ## Bot definition (YAML)
 
 See [examples/](examples/) for runnable configs. Full field reference below.

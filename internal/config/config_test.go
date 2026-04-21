@@ -276,6 +276,87 @@ transports:
 	}
 }
 
+func TestLoadIMessageResolvesPasswordEnv(t *testing.T) {
+	t.Setenv("TEST_BB_PASSWORD", "hunter2")
+	p := write(t, `
+bots: [b.yml]
+transports:
+  - type: imessage
+    server_url: http://localhost:1234
+    password_env: TEST_BB_PASSWORD
+    state_dir: /tmp/bb
+`)
+	cfg, err := Load(p)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	tr := cfg.Transports[0]
+	if tr.Type != TransportIMessage {
+		t.Errorf("type: got %q, want imessage", tr.Type)
+	}
+	if tr.ServerURL != "http://localhost:1234" || tr.StateDir != "/tmp/bb" {
+		t.Errorf("fields not parsed: %+v", tr)
+	}
+	if tr.Password != "hunter2" {
+		t.Errorf("password not resolved: %+v", tr)
+	}
+}
+
+func TestLoadIMessageRejectsEmptyPasswordEnv(t *testing.T) {
+	t.Setenv("NEVER_SET_BB", "")
+	p := write(t, `
+bots: [b.yml]
+transports:
+  - type: imessage
+    server_url: http://localhost:1234
+    password_env: NEVER_SET_BB
+    state_dir: /tmp/bb
+`)
+	_, err := Load(p)
+	if err == nil {
+		t.Fatal("expected empty-env error")
+	}
+	if !strings.Contains(err.Error(), "NEVER_SET_BB") {
+		t.Errorf("error should name the missing env var: %v", err)
+	}
+}
+
+func TestLoadIMessageRejectsMissingServerURL(t *testing.T) {
+	t.Setenv("BB", "pw")
+	p := write(t, `
+bots: [b.yml]
+transports:
+  - type: imessage
+    password_env: BB
+    state_dir: /tmp/bb
+`)
+	_, err := Load(p)
+	if err == nil {
+		t.Fatal("expected missing server_url error")
+	}
+	if !strings.Contains(err.Error(), "server_url") {
+		t.Errorf("error should mention server_url: %v", err)
+	}
+}
+
+func TestLoadIMessageRejectsMissingStateDir(t *testing.T) {
+	t.Setenv("BB", "pw")
+	p := write(t, `
+bots: [b.yml]
+transports:
+  - type: imessage
+    server_url: http://localhost:1234
+    password_env: BB
+`)
+	_, err := Load(p)
+	if err == nil {
+		t.Fatal("expected missing state_dir error")
+	}
+	if !strings.Contains(err.Error(), "state_dir") {
+		t.Errorf("error should mention state_dir: %v", err)
+	}
+}
+
 func TestLoadRejectsSignalMissingFields(t *testing.T) {
 	p := write(t, `
 bots: [b.yml]

@@ -9,3 +9,13 @@ transports:
   - type: slack
     bot_token_env: SLACK_BOT_TOKEN
     app_token_env: SLACK_APP_TOKEN
+
+  # iMessage via a BlueBubbles Server (https://bluebubbles.app) running on
+  # the same Mac. Register `http://127.0.0.1:4321/imessage-webhook` in the
+  # BlueBubbles UI for the `new-message` event before starting secret-agent.
+  - type: imessage
+    server_url: http://localhost:1234
+    password_env: BLUEBUBBLES_PASSWORD
+    state_dir: ./imessage-state
+    webhook_listen: 127.0.0.1:4321
+    webhook_path: /imessage-webhook

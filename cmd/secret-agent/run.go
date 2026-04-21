@@ -17,6 +17,7 @@ import (
 	"github.com/jtarchie/secret-agent/internal/bot"
 	"github.com/jtarchie/secret-agent/internal/chat"
 	"github.com/jtarchie/secret-agent/internal/chat/cli"
+	imessagetransport "github.com/jtarchie/secret-agent/internal/chat/imessage"
 	signaltransport "github.com/jtarchie/secret-agent/internal/chat/signal"
 	slacktransport "github.com/jtarchie/secret-agent/internal/chat/slack"
 	"github.com/jtarchie/secret-agent/internal/config"
@@ -186,6 +187,18 @@ func buildTransports(cfg *config.Config, logger *slog.Logger, routes []router.Ro
 				opts = append(opts, slacktransport.WithMessagePrefix(t.MessagePrefix))
 			}
 			out = append(out, slacktransport.New(t.BotToken, t.AppToken, opts...))
+		case config.TransportIMessage:
+			opts := []imessagetransport.Option{imessagetransport.WithLogger(logger)}
+			if t.WebhookListen != "" {
+				opts = append(opts, imessagetransport.WithWebhookListen(t.WebhookListen))
+			}
+			if t.WebhookPath != "" {
+				opts = append(opts, imessagetransport.WithWebhookPath(t.WebhookPath))
+			}
+			if t.MessagePrefix != "" {
+				opts = append(opts, imessagetransport.WithMessagePrefix(t.MessagePrefix))
+			}
+			out = append(out, imessagetransport.New(t.ServerURL, t.Password, t.StateDir, opts...))
 		default:
 			return nil, fmt.Errorf("unknown transport type %q", t.Type)
 		}

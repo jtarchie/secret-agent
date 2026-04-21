@@ -655,6 +655,64 @@ slack_channels:
 	}
 }
 
+func TestLoadIMessageUsersValid(t *testing.T) {
+	p := writeBot(t, `
+name: b
+system: s
+imessage_users:
+  - "+15551234567"
+  - "  person@icloud.com  "
+  - "+15551234567"
+`)
+	b, err := Load(p)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if len(b.IMessageUsers) != 2 {
+		t.Fatalf("len(imessage_users) = %d, want 2 (trimmed + deduped); got %v", len(b.IMessageUsers), b.IMessageUsers)
+	}
+	if b.IMessageUsers[0] != "+15551234567" || b.IMessageUsers[1] != "person@icloud.com" {
+		t.Errorf("imessage_users = %v", b.IMessageUsers)
+	}
+}
+
+func TestLoadIMessageUsersRejectsBadHandle(t *testing.T) {
+	p := writeBot(t, `
+name: b
+system: s
+imessage_users:
+  - "not-a-handle"
+`)
+	_, err := Load(p)
+	if err == nil {
+		t.Fatal("expected error for non-iMessage handle")
+	}
+	if !strings.Contains(err.Error(), "iMessage handle") {
+		t.Errorf("error should mention iMessage handle: %v", err)
+	}
+}
+
+func TestLoadIMessageChatsValid(t *testing.T) {
+	p := writeBot(t, `
+name: b
+system: s
+imessage_chats:
+  - "iMessage;+;chat123456789"
+  - "  iMessage;+;chat987654321  "
+  - "iMessage;+;chat123456789"
+`)
+	b, err := Load(p)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if len(b.IMessageChats) != 2 {
+		t.Fatalf("len(imessage_chats) = %d, want 2; got %v", len(b.IMessageChats), b.IMessageChats)
+	}
+	if b.IMessageChats[0] != "iMessage;+;chat123456789" || b.IMessageChats[1] != "iMessage;+;chat987654321" {
+		t.Errorf("imessage_chats = %v", b.IMessageChats)
+	}
+}
+
 func TestLoadPermissionsInvalidMemory(t *testing.T) {
 	p := writeBot(t, `
 name: b

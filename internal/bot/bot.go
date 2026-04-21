@@ -23,8 +23,12 @@ type Bot struct {
 	Groups []string `yaml:"groups,omitempty"`
 	// SlackUsers and SlackChannels scope the bot to Slack user IDs (U...)
 	// and channel IDs (C... for public, D... for DMs, G... for private).
-	SlackUsers    []string            `yaml:"slack_users,omitempty"`
-	SlackChannels []string            `yaml:"slack_channels,omitempty"`
+	SlackUsers    []string `yaml:"slack_users,omitempty"`
+	SlackChannels []string `yaml:"slack_channels,omitempty"`
+	// IMessageUsers and IMessageChats scope the bot to iMessage handles
+	// (E.164 phone numbers or Apple-ID emails) and BlueBubbles chat GUIDs.
+	IMessageUsers []string            `yaml:"imessage_users,omitempty"`
+	IMessageChats []string            `yaml:"imessage_chats,omitempty"`
 	Permissions   Permissions         `yaml:"permissions,omitempty"`
 	Tools         []Tool              `yaml:"tools"`
 	Agents        map[string]AgentRef `yaml:"agents"`
@@ -231,6 +235,10 @@ var (
 	e164Re         = regexp.MustCompile(`^\+[1-9]\d{6,14}$`)
 	slackUserRe    = regexp.MustCompile(`^[UW][A-Z0-9]{2,}$`)
 	slackChannelRe = regexp.MustCompile(`^[CDG][A-Z0-9]{2,}$`)
+	// iMessage handles are either E.164 phones or Apple-ID emails; a loose
+	// local@domain shape is enough to catch typos without rejecting valid
+	// addresses.
+	imessageEmailRe = regexp.MustCompile(`^[^@\s]+@[^@\s]+\.[^@\s]+$`)
 	reservedParams = map[string]struct{}{
 		"path": {}, "home": {}, "user": {}, "shell": {}, "pwd": {},
 		"ifs": {}, "ld_preload": {}, "ld_library_path": {},
@@ -618,6 +626,43 @@ func loadBot(path string, visited map[string]bool, depth int) (*Bot, error) {
 			deduped = append(deduped, c)
 		}
 		b.SlackChannels = deduped
+	}
+
+	if len(b.IMessageUsers) > 0 {
+		seen := make(map[string]struct{}, len(b.IMessageUsers))
+		deduped := b.IMessageUsers[:0]
+		for i, u := range b.IMessageUsers {
+			u = strings.TrimSpace(u)
+			if u == "" {
+				return nil, fmt.Errorf("%s: imessage_users[%d]: must not be empty", path, i)
+			}
+			if !e164Re.MatchString(u) && !imessageEmailRe.MatchString(u) {
+				return nil, fmt.Errorf("%s: imessage_users[%d]: %q is not a valid iMessage handle (expected E.164 phone or email)", path, i, u)
+			}
+			if _, dup := seen[u]; dup {
+				continue
+			}
+			seen[u] = struct{}{}
+			deduped = append(deduped, u)
+		}
+		b.IMessageUsers = deduped
+	}
+
+	if len(b.IMessageChats) > 0 {
+		seen := make(map[string]struct{}, len(b.IMessageChats))
+		deduped := b.IMessageChats[:0]
+		for i, c := range b.IMessageChats {
+			c = strings.TrimSpace(c)
+			if c == "" {
+				return nil, fmt.Errorf("%s: imessage_chats[%d]: must not be empty", path, i)
+			}
+			if _, dup := seen[c]; dup {
+				continue
+			}
+			seen[c] = struct{}{}
+			deduped = append(deduped, c)
+		}
+		b.IMessageChats = deduped
 	}
 
 	for i := range b.Tools {
