@@ -239,7 +239,7 @@ var (
 	// local@domain shape is enough to catch typos without rejecting valid
 	// addresses.
 	imessageEmailRe = regexp.MustCompile(`^[^@\s]+@[^@\s]+\.[^@\s]+$`)
-	reservedParams = map[string]struct{}{
+	reservedParams  = map[string]struct{}{
 		"path": {}, "home": {}, "user": {}, "shell": {}, "pwd": {},
 		"ifs": {}, "ld_preload": {}, "ld_library_path": {},
 	}

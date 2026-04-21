@@ -158,7 +158,9 @@ func (t *Transport) Run(ctx context.Context, dispatcher chat.Dispatcher) error {
 
 	select {
 	case <-ctx.Done():
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		// ctx is already canceled in this branch; WithoutCancel keeps the
+		// parent's values while giving Shutdown real time to drain.
+		shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 		defer cancel()
 		_ = srv.Shutdown(shutdownCtx)
 		log.Info("shutdown", "reason", "context canceled", "err", ctx.Err())

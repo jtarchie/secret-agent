@@ -18,7 +18,7 @@ import (
 	"github.com/jtarchie/secret-agent/internal/chat"
 )
 
-func nullLogger() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
+func nullLogger() *slog.Logger { return slog.New(slog.DiscardHandler) }
 
 // fakeDispatcher records the envelope/message received and replies with a
 // canned body on a goroutine-managed channel.

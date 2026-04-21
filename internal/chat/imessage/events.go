@@ -37,8 +37,8 @@ type participant struct {
 }
 
 type attachment struct {
-	GUID       string `json:"guid"`
-	MIMEType   string `json:"mimeType"`
+	GUID         string `json:"guid"`
+	MIMEType     string `json:"mimeType"`
 	TransferName string `json:"transferName"`
 }
 

@@ -53,14 +53,14 @@ type Transport struct {
 
 	// iMessage fields (backed by a BlueBubbles Server). The server password
 	// must be supplied via env var indirection like Slack's tokens.
-	ServerURL      string `yaml:"server_url,omitempty"`
-	PasswordEnv    string `yaml:"password_env,omitempty"`
-	Password       string `yaml:"-"`
+	ServerURL   string `yaml:"server_url,omitempty"`
+	PasswordEnv string `yaml:"password_env,omitempty"`
+	Password    string `yaml:"-"`
 	// WebhookListen is the host:port our HTTP listener binds to; BlueBubbles
 	// Server must be configured to POST to http://<this addr><webhook_path>.
 	// Optional; defaults are chosen by the transport.
-	WebhookListen  string `yaml:"webhook_listen,omitempty"`
-	WebhookPath    string `yaml:"webhook_path,omitempty"`
+	WebhookListen string `yaml:"webhook_listen,omitempty"`
+	WebhookPath   string `yaml:"webhook_path,omitempty"`
 
 	// MessagePrefix is prepended verbatim to every outgoing reply (including
 	// error bodies). Mainly useful on Signal, where bot messages are otherwise
