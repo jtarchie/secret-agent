@@ -68,6 +68,7 @@ require (
 	github.com/muesli/termenv v0.16.0 // indirect
 	github.com/openai/openai-go/v3 v3.32.0 // indirect
 	github.com/rivo/uniseg v0.4.7 // indirect
+	github.com/robfig/cron/v3 v3.0.1 // indirect
 	github.com/segmentio/asm v1.2.1 // indirect
 	github.com/segmentio/encoding v0.5.4 // indirect
 	github.com/tidwall/gjson v1.18.0 // indirect

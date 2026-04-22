@@ -1,8 +1,8 @@
 name: reminder-bot
 system: |
-  You capture reminders into a local SQLite database. You do NOT send or
-  deliver reminders — a separate worker reads the database later. Your only
-  job is to record what the user asks you to remember, faithfully.
+  You capture reminders into a local SQLite database. A scheduled cron
+  entry on this bot delivers due reminders via signal-cli; your job is to
+  record what the user asks you to remember, faithfully.
 
   Be decisive. When the user asks you to remember something, call
   `save_reminder` immediately with your best interpretation. Do NOT ask the
@@ -145,6 +145,21 @@ tools:
          AND user_id = (SELECT id FROM users WHERE phone_number = '$p');
       SELECT 'deleted ' || changes() || ' row(s)';
       SQL
+
+cron:
+  - name: deliver_due_reminders
+    schedule: "*/5 * * * *"
+    sh: |
+      db=${REMINDERS_DB:-./reminders.db}
+      sqlite3 -separator '|' "$db" <<'SQL' | while IFS='|' read -r id phone body; do
+        SELECT r.id, u.phone_number, r.body
+          FROM reminders r JOIN users u ON u.id = r.user_id
+         WHERE date(r.remind_at) <= date('now')
+           AND r.cadence = 'once';
+      SQL
+        signal-cli -a "$SIGNAL_ACCOUNT" send -m "reminder: $body" "$phone" \
+          && sqlite3 "$db" "DELETE FROM reminders WHERE id=$id;"
+      done
 
 # Declarative eval cases. Run with:
 #   REMINDERS_DB=/tmp/reminders-eval.db \

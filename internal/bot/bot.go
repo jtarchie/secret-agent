@@ -9,7 +9,9 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
+	"github.com/robfig/cron/v3"
 	"gopkg.in/yaml.v3"
 )
 
@@ -34,6 +36,7 @@ type Bot struct {
 	Agents        map[string]AgentRef `yaml:"agents"`
 	Hooks         []Hook              `yaml:"hooks"`
 	MCP           []MCPServer         `yaml:"mcp,omitempty"`
+	Cron          []Cron              `yaml:"cron,omitempty"`
 	Tests         []TestCase          `yaml:"tests,omitempty"`
 
 	// Per-bot model override. All three fields are optional; unset fields
@@ -172,6 +175,22 @@ type Hook struct {
 	Sh   string    `yaml:"sh,omitempty"`
 	Expr string    `yaml:"expr,omitempty"`
 	Js   string    `yaml:"js,omitempty"`
+}
+
+// Cron is a scheduled directive that spins up the bot on a timer rather
+// than in response to an incoming user message. Exactly one of Schedule
+// (5-field cron expression) or Every (Go duration) sets the cadence; and
+// exactly one of Prompt / Sh / Expr / Js sets the directive. Prompt mode
+// runs the directive through the agent as a synthetic user turn; the
+// script modes execute directly without invoking the LLM.
+type Cron struct {
+	Name     string `yaml:"name"`
+	Schedule string `yaml:"schedule,omitempty"`
+	Every    string `yaml:"every,omitempty"`
+	Prompt   string `yaml:"prompt,omitempty"`
+	Sh       string `yaml:"sh,omitempty"`
+	Expr     string `yaml:"expr,omitempty"`
+	Js       string `yaml:"js,omitempty"`
 }
 
 // AgentRef is a reference to a sub-agent defined in its own YAML file.
@@ -455,6 +474,72 @@ func normalizeMCPServer(m *MCPServer) error {
 	}
 
 	return nil
+}
+
+// cronParser parses the standard 5-field cron expression used by
+// `schedule:`. It is shared between validation (fail fast at load time)
+// and the scheduler package (which re-parses for registration).
+var cronParser = cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow)
+
+// normalizeCron trims, validates, and parses a single Cron entry. It does
+// not detect name collisions with other entries — that is the caller's job.
+func normalizeCron(c *Cron) error {
+	c.Name = strings.TrimSpace(c.Name)
+	c.Schedule = strings.TrimSpace(c.Schedule)
+	c.Every = strings.TrimSpace(c.Every)
+	c.Prompt = strings.TrimSpace(c.Prompt)
+	c.Sh = strings.TrimSpace(c.Sh)
+	c.Expr = strings.TrimSpace(c.Expr)
+	c.Js = strings.TrimSpace(c.Js)
+
+	if c.Name == "" {
+		return errors.New("name is required")
+	}
+	if !paramNameRe.MatchString(c.Name) {
+		return fmt.Errorf("name %q must match [A-Za-z_][A-Za-z0-9_]*", c.Name)
+	}
+
+	switch {
+	case c.Schedule != "" && c.Every != "":
+		return errors.New("only one of schedule or every may be set")
+	case c.Schedule == "" && c.Every == "":
+		return errors.New("exactly one of schedule or every is required")
+	case c.Schedule != "":
+		_, err := cronParser.Parse(c.Schedule)
+		if err != nil {
+			return fmt.Errorf("invalid schedule %q: %w", c.Schedule, err)
+		}
+	case c.Every != "":
+		d, err := time.ParseDuration(c.Every)
+		if err != nil {
+			return fmt.Errorf("invalid every %q: %w", c.Every, err)
+		}
+		if d < time.Second {
+			return fmt.Errorf("every %q: minimum interval is 1s", c.Every)
+		}
+	}
+
+	set := []string{}
+	if c.Prompt != "" {
+		set = append(set, "prompt")
+	}
+	if c.Sh != "" {
+		set = append(set, "sh")
+	}
+	if c.Expr != "" {
+		set = append(set, "expr")
+	}
+	if c.Js != "" {
+		set = append(set, "js")
+	}
+	switch len(set) {
+	case 0:
+		return errors.New("exactly one of prompt, sh, expr, js is required")
+	case 1:
+		return nil
+	default:
+		return fmt.Errorf("only one of prompt, sh, expr, js may be set (got %s)", strings.Join(set, ", "))
+	}
 }
 
 func validateHookBody(h *Hook) error {
@@ -754,6 +839,19 @@ func loadBot(path string, visited map[string]bool, depth int) (*Bot, error) {
 		if err != nil {
 			return nil, fmt.Errorf("%s: hooks[%d]: %w", path, i, err)
 		}
+	}
+
+	seenCronNames := make(map[string]struct{}, len(b.Cron))
+	for i := range b.Cron {
+		c := &b.Cron[i]
+		err := normalizeCron(c)
+		if err != nil {
+			return nil, fmt.Errorf("%s: cron[%d]: %w", path, i, err)
+		}
+		if _, dup := seenCronNames[c.Name]; dup {
+			return nil, fmt.Errorf("%s: cron[%d]: duplicate name %q", path, i, c.Name)
+		}
+		seenCronNames[c.Name] = struct{}{}
 	}
 
 	seenTestNames := make(map[string]struct{}, len(b.Tests))

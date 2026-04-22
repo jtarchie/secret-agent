@@ -85,6 +85,164 @@ tools:
 	}
 }
 
+func TestLoadCronValid(t *testing.T) {
+	p := writeBot(t, `
+name: b
+system: s
+cron:
+  - name: deliver
+    schedule: "*/5 * * * *"
+    sh: echo ok
+  - name: tick
+    every: 1m
+    prompt: check things
+  - name: compute
+    every: 30s
+    expr: 1 + 1
+  - name: scriptlet
+    schedule: "0 9 * * *"
+    js: |
+      1 + 2
+`)
+	b, err := Load(p)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if len(b.Cron) != 4 {
+		t.Fatalf("len(Cron) = %d, want 4", len(b.Cron))
+	}
+	if b.Cron[0].Name != "deliver" || b.Cron[0].Schedule != "*/5 * * * *" || b.Cron[0].Sh != "echo ok" {
+		t.Errorf("entry[0] = %+v", b.Cron[0])
+	}
+	if b.Cron[1].Every != "1m" || b.Cron[1].Prompt != "check things" {
+		t.Errorf("entry[1] = %+v", b.Cron[1])
+	}
+}
+
+func TestLoadCronErrors(t *testing.T) {
+	cases := []struct {
+		name string
+		yaml string
+		want string
+	}{
+		{
+			name: "missing_name",
+			yaml: `
+cron:
+  - schedule: "* * * * *"
+    sh: echo ok
+`,
+			want: "name is required",
+		},
+		{
+			name: "duplicate_name",
+			yaml: `
+cron:
+  - name: tick
+    every: 5s
+    sh: echo one
+  - name: tick
+    every: 5s
+    sh: echo two
+`,
+			want: "duplicate name",
+		},
+		{
+			name: "both_schedule_and_every",
+			yaml: `
+cron:
+  - name: x
+    schedule: "* * * * *"
+    every: 1m
+    sh: echo ok
+`,
+			want: "only one of schedule or every",
+		},
+		{
+			name: "neither_schedule_nor_every",
+			yaml: `
+cron:
+  - name: x
+    sh: echo ok
+`,
+			want: "exactly one of schedule or every",
+		},
+		{
+			name: "bad_schedule",
+			yaml: `
+cron:
+  - name: x
+    schedule: "definitely not cron"
+    sh: echo ok
+`,
+			want: "invalid schedule",
+		},
+		{
+			name: "bad_every",
+			yaml: `
+cron:
+  - name: x
+    every: "not a duration"
+    sh: echo ok
+`,
+			want: "invalid every",
+		},
+		{
+			name: "every_too_small",
+			yaml: `
+cron:
+  - name: x
+    every: 100ms
+    sh: echo ok
+`,
+			want: "minimum interval",
+		},
+		{
+			name: "no_body",
+			yaml: `
+cron:
+  - name: x
+    every: 5s
+`,
+			want: "exactly one of prompt, sh, expr, js",
+		},
+		{
+			name: "multiple_bodies",
+			yaml: `
+cron:
+  - name: x
+    every: 5s
+    sh: echo ok
+    prompt: ping
+`,
+			want: "only one of prompt, sh, expr, js",
+		},
+		{
+			name: "bad_name",
+			yaml: `
+cron:
+  - name: "has space"
+    every: 5s
+    sh: echo ok
+`,
+			want: "must match",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := writeBot(t, "name: b\nsystem: s\n"+tc.yaml)
+			_, err := Load(p)
+			if err == nil {
+				t.Fatal("expected error")
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error %q should contain %q", err.Error(), tc.want)
+			}
+		})
+	}
+}
+
 func writeFile(t *testing.T, dir, name, body string) string {
 	t.Helper()
 	p := filepath.Join(dir, name)

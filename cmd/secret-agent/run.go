@@ -21,6 +21,7 @@ import (
 	signaltransport "github.com/jtarchie/secret-agent/internal/chat/signal"
 	slacktransport "github.com/jtarchie/secret-agent/internal/chat/slack"
 	"github.com/jtarchie/secret-agent/internal/config"
+	cronpkg "github.com/jtarchie/secret-agent/internal/cron"
 	"github.com/jtarchie/secret-agent/internal/model"
 	"github.com/jtarchie/secret-agent/internal/router"
 	"github.com/jtarchie/secret-agent/internal/runtime"
@@ -111,6 +112,7 @@ func (c *RunCmd) Run() error {
 		return llm, nil
 	}
 
+	scheduler := cronpkg.New(logger)
 	routes := make([]router.Route, 0, len(topBots))
 	for _, b := range topBots {
 		rt, err := runtime.New(ctx, b, llm, runtime.WithModelResolver(resolver))
@@ -128,6 +130,10 @@ func (c *RunCmd) Run() error {
 			return fmt.Errorf("route bot %q: %w", b.Name, err)
 		}
 		routes = append(routes, route)
+		err = scheduler.Register(b, rt)
+		if err != nil {
+			return fmt.Errorf("register cron for bot %q: %w", b.Name, err)
+		}
 	}
 
 	rtr, err := router.New(routes, router.WithLogger(logger))
@@ -144,6 +150,9 @@ func (c *RunCmd) Run() error {
 	for _, tp := range transports {
 		tp := tp
 		g.Go(func() error { return tp.Run(gctx, rtr) })
+	}
+	if scheduler.HasJobs() {
+		g.Go(func() error { return scheduler.Run(gctx) })
 	}
 	err = g.Wait()
 	if err != nil && !errors.Is(err, context.Canceled) {
