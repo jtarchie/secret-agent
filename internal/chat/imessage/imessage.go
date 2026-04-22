@@ -67,6 +67,23 @@ func WithMessagePrefix(p string) Option {
 	return func(t *Transport) { t.messagePrefix = p }
 }
 
+// Send dispatches an unsolicited message via osascript. `to` is treated
+// as an iMessage chat GUID (group) when it contains a `;`, otherwise as
+// a direct recipient (E.164 phone or Apple-ID email).
+func (t *Transport) Send(ctx context.Context, to, text string) error {
+	if to == "" {
+		return errors.New("imessage send: recipient is required")
+	}
+	body := text
+	if t.messagePrefix != "" {
+		body = t.messagePrefix + body
+	}
+	if strings.Contains(to, ";") {
+		return sendGroup(ctx, t.osascriptBin, to, body)
+	}
+	return sendDM(ctx, t.osascriptBin, to, body)
+}
+
 // New constructs an iMessage transport. databasePath is the chat.db path
 // (typically ~/Library/Messages/chat.db); stateDir is where the ROWID
 // cursor is persisted across restarts so we don't re-deliver history.

@@ -37,6 +37,11 @@ type Transport struct {
 	// fileDownloadTimeout bounds each attachment download. Slack file URLs
 	// are small by default (~a few MB); 60s is a generous ceiling.
 	fileDownloadTimeout time.Duration
+
+	// senderMu guards senderAPI. Populated while Run is active so Send can
+	// post messages on the same authenticated client.
+	senderMu  sync.Mutex
+	senderAPI *slackgo.Client
 }
 
 type Option func(*Transport)
@@ -99,6 +104,14 @@ func (t *Transport) Run(ctx context.Context, dispatcher chat.Dispatcher) error {
 		t.botToken,
 		slackgo.OptionAppLevelToken(t.appToken),
 	)
+	t.senderMu.Lock()
+	t.senderAPI = api
+	t.senderMu.Unlock()
+	defer func() {
+		t.senderMu.Lock()
+		t.senderAPI = nil
+		t.senderMu.Unlock()
+	}()
 
 	authCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	auth, err := api.AuthTestContext(authCtx)
@@ -143,6 +156,30 @@ func (t *Transport) Run(ctx context.Context, dispatcher chat.Dispatcher) error {
 
 	if runErr != nil && !errors.Is(runErr, context.Canceled) {
 		return fmt.Errorf("slack socket mode: %w", runErr)
+	}
+	return nil
+}
+
+// Send posts an unsolicited message. `to` may be a user ID (U.../W...),
+// a channel ID (C.../G...), or an IM channel ID (D...). chat.postMessage
+// accepts user IDs directly and opens the IM conversation on demand.
+func (t *Transport) Send(ctx context.Context, to, text string) error {
+	t.senderMu.Lock()
+	api := t.senderAPI
+	t.senderMu.Unlock()
+	if api == nil {
+		return errors.New("slack transport: not running (cannot send)")
+	}
+	if to == "" {
+		return errors.New("slack send: channel is required")
+	}
+	body := text
+	if t.messagePrefix != "" {
+		body = t.messagePrefix + body
+	}
+	_, _, err := api.PostMessageContext(ctx, to, slackgo.MsgOptionText(body, false))
+	if err != nil {
+		return fmt.Errorf("slack send: %w", err)
 	}
 	return nil
 }

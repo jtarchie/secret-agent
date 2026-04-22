@@ -2,7 +2,6 @@ package cron
 
 import (
 	"context"
-	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -48,7 +47,7 @@ func (s *stubRunner) snapshot() (convIDs, texts []string) {
 }
 
 func discardLogger() *slog.Logger {
-	return slog.New(slog.NewTextHandler(io.Discard, nil))
+	return slog.New(slog.DiscardHandler)
 }
 
 func TestSchedulerShEveryFires(t *testing.T) {
@@ -64,7 +63,7 @@ func TestSchedulerShEveryFires(t *testing.T) {
 		}},
 	}
 
-	s := New(discardLogger())
+	s := New(discardLogger(), nil)
 	err := s.Register(b, &stubRunner{})
 	if err != nil {
 		t.Fatalf("register: %v", err)
@@ -101,7 +100,7 @@ func TestSchedulerPromptFires(t *testing.T) {
 		}},
 	}
 
-	s := New(discardLogger())
+	s := New(discardLogger(), nil)
 	err := s.Register(b, runner)
 	if err != nil {
 		t.Fatalf("register: %v", err)
@@ -157,7 +156,7 @@ func TestSchedulerSkipsOverlap(t *testing.T) {
 		}},
 	}
 
-	s := New(discardLogger())
+	s := New(discardLogger(), nil)
 	err := s.Register(b, runner)
 	if err != nil {
 		t.Fatalf("register: %v", err)
@@ -195,10 +194,59 @@ func TestSchedulerBadScheduleErrors(t *testing.T) {
 			Sh:       "echo ok",
 		}},
 	}
-	s := New(discardLogger())
+	s := New(discardLogger(), nil)
 	err := s.Register(b, &stubRunner{})
 	if err == nil {
 		t.Fatal("expected error")
+	}
+}
+
+// fakeSender records Send calls for end-to-end sa_send tests.
+type fakeSender struct {
+	mu    sync.Mutex
+	calls []string
+}
+
+func (f *fakeSender) Send(_ context.Context, to, text string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls = append(f.calls, to+"|"+text)
+	return nil
+}
+
+func (f *fakeSender) count() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.calls)
+}
+
+func TestSchedulerShDispatchesViaSaSend(t *testing.T) {
+	sender := &fakeSender{}
+	reg := chat.SenderRegistry{"signal": sender}
+
+	b := &bot.Bot{
+		Name: "tbot",
+		Cron: []bot.Cron{{
+			Name:  "dispatch",
+			Every: "1s",
+			Sh:    `sa_send signal +15551234567 "hello from cron"`,
+		}},
+	}
+	s := New(discardLogger(), reg)
+	err := s.Register(b, &stubRunner{})
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+	defer cancel()
+	err = s.Run(ctx)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	if sender.count() < 1 {
+		t.Fatalf("expected at least one sa_send call, got %d", sender.count())
 	}
 }
 
@@ -211,7 +259,7 @@ func TestSchedulerExprFires(t *testing.T) {
 			Expr:  "1 + 1",
 		}},
 	}
-	s := New(discardLogger())
+	s := New(discardLogger(), nil)
 	err := s.Register(b, &stubRunner{})
 	if err != nil {
 		t.Fatalf("register: %v", err)

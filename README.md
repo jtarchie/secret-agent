@@ -2,8 +2,9 @@
 
 A YAML-defined chat bot with pluggable transports. Ships a terminal CLI,
 a Signal transport backed by [signal-cli](https://github.com/AsamK/signal-cli),
-and a Slack transport using Socket Mode. Multiple transports can run
-concurrently in one process.
+a Slack transport using Socket Mode, and a macOS iMessage transport that
+drives Messages.app. Multiple transports can run concurrently in one
+process.
 
 ## Installation
 
@@ -234,6 +235,7 @@ See [examples/](examples/) for runnable configs. Full field reference below.
 | `agents` | map[string]AgentRef | no | Sub-agents callable as tools (max nesting 8, no cycles). |
 | `hooks` | []Hook | no | Bot-level callbacks (before/after model, tool, agent). |
 | `mcp` | []MCPServer | no | External MCP servers to expose. |
+| `cron` | []Cron | no | Scheduled directives that fire the bot on a timer (prompt / sh / expr / js). |
 | `tests` | []TestCase | no | Declarative eval cases — see *Evaluation*. |
 | `model` | string | no | Per-bot model override (`provider/model-name`). Unset = global `--model`. Also honored on sub-agent YAMLs. |
 | `api_key_env` | string | no | Env var name holding the API key for this bot. Unset = global `--api-key`. Never inline the key. |
@@ -278,6 +280,8 @@ Param types: `string`, `integer`, `number`, `boolean`, `attachment`, `markdown`.
 
 Every `sh:` tool also receives identity env vars from the transport (when the transport provides them): `$SENDER_ID` (E.164 on Signal, `U…`/`W…` on Slack, empty on CLI), `$SENDER_PHONE` (E.164 on Signal only), `$SENDER_TRANSPORT` (`signal` / `slack` / `cli`), `$CONV_ID` (stable per DM / thread / group). Prefer `$SENDER_ID` over `$SENDER_PHONE` for new bots — `$SENDER_PHONE` is Signal-only and empty on Slack. `expr` and `js` tools see the same four values as top-level bindings (`sender_id`, `sender_phone`, `sender_transport`, `conv_id`). A user-declared param of the same name wins.
 
+Shell tools also get the `sa_send` builtin for dispatching outbound messages; see *Outbound send* below for the full reference.
+
 ### Agents
 
 | Field | Type | Purpose |
@@ -306,6 +310,70 @@ Every `sh:` tool also receives identity env vars from the transport (when the tr
 | `require_confirmation` | bool | Human-in-the-loop gate per call. |
 
 Exactly one of `command` / `url` is required.
+
+### Cron
+
+Scheduled directives that run the bot without an incoming user message. Each entry fires on its own cadence and invokes one of four bodies: a synthetic `prompt:` (runs through the agent as a simulated user turn) or a `sh:` / `expr:` / `js:` body (bypasses the LLM).
+
+| Field | Type | Purpose |
+|---|---|---|
+| `name` | string | Unique within the bot (matches `[A-Za-z_][A-Za-z0-9_]*`). |
+| `schedule` | string | Standard 5-field cron expression, e.g. `*/5 * * * *`. |
+| `every` | duration | Go duration (`30s`, `5m`, `1h`). Minimum `1s`. |
+| `prompt` / `sh` / `expr` / `js` | string | Directive body — exactly one required. |
+
+Exactly one of `schedule` / `every` and exactly one of `prompt` / `sh` / `expr` / `js` must be set. `prompt:` turns share a synthetic conversation id `cron:<bot>:<cron>`, so `permissions.memory: full` bots accumulate context across fires; `memory: none` bots get a fresh session per fire via the same stateless branch the message handler uses. If a previous fire is still running when the next cadence tick arrives, the new fire is skipped with a warn log (via robfig/cron's `SkipIfStillRunning`). Output is logged — not routed — so if you want to notify a user, call `sa_send` from `sh:` or use the `send_message` binding / tool (see *Outbound send* below).
+
+```yaml
+cron:
+  - name: deliver_due_reminders
+    schedule: "*/5 * * * *"
+    sh: |
+      sqlite3 "$db" "SELECT phone, body FROM reminders WHERE remind_at <= date('now')" |
+        while IFS='|' read -r phone body; do
+          sa_send signal "$phone" "reminder: $body" \
+            && sqlite3 "$db" "DELETE FROM reminders WHERE phone='$phone' AND body='$body'"
+        done
+```
+
+See [examples/reminders/bot.yml](examples/reminders/bot.yml) for the full reminders-delivery cron.
+
+### Outbound send
+
+Any configured transport can be used to push an unsolicited message to a specific recipient — this is how a cron fire or a regular tool notifies a user who did not send the current message. The same underlying `SenderRegistry` backs three call sites:
+
+**Shell builtin `sa_send`** — available inside any `sh:` body (cron or regular bot tool):
+
+```sh
+sa_send <transport> <to> <body>
+# e.g.
+sa_send signal +15551234567 "reminder: take out the trash"
+```
+
+A failed `sa_send` exits non-zero, so chain with `&&` for delete-after-send patterns.
+
+**ADK tool `send_message`** — auto-registered on every root agent when at least one sending transport is configured. The LLM can call it during a `prompt:` cron turn (or any normal conversation turn) to notify a third party:
+
+```
+send_message(transport="signal", to="+15551234567", body="…")
+```
+
+**Expr / JS binding** — inside cron `expr:` / `js:` bodies only:
+
+```js
+send_message("signal", "+15551234567", "from js")
+```
+
+Returns a JSON string — `{"ok":true}` on success, `{"ok":false,"error":"…"}` on failure.
+
+**Target format per transport:**
+
+| Transport | `to` format |
+|---|---|
+| `signal`   | E.164 phone (DM) or base64 group ID. |
+| `slack`    | User ID (`U…`), channel ID (`C…`), or IM channel (`D…`). |
+| `imessage` | E.164 phone or Apple-ID email (DM); chat GUID (contains `;`) for groups. |
+| `cli`      | Not supported — returns `ErrSendUnsupported`, since the CLI is an interactive TUI. |
 
 ### Tests (evaluation cases)
 

@@ -46,6 +46,7 @@ type Option func(*options)
 type options struct {
 	recorder ToolRecorder
 	resolver ModelResolver
+	senders  chat.SenderRegistry
 }
 
 // WithToolRecorder attaches a callback that fires after every tool call on
@@ -53,6 +54,14 @@ type options struct {
 // (the callback cannot mutate args or results).
 func WithToolRecorder(fn ToolRecorder) Option {
 	return func(o *options) { o.recorder = fn }
+}
+
+// WithSenderRegistry attaches a registry of transport senders. When set,
+// every sh: tool gets the `sa_send` shell builtin and every agent gets a
+// framework-provided `send_message` ADK tool for dispatching outbound
+// messages via any configured transport.
+func WithSenderRegistry(reg chat.SenderRegistry) Option {
+	return func(o *options) { o.senders = reg }
 }
 
 // ModelResolver returns the LLM to use for a given bot. Called once per bot
@@ -96,7 +105,7 @@ func New(ctx context.Context, b *bot.Bot, llm adkmodel.LLM, opts ...Option) (*Ru
 	}
 
 	_ = ctx // reserved for future use; setup performs no I/O that needs cancellation
-	bld := &builder{recorder: cfg.recorder, resolver: cfg.resolver}
+	bld := &builder{recorder: cfg.recorder, resolver: cfg.resolver, senders: cfg.senders}
 	//nolint:contextcheck // buildAgent is pure wiring — no I/O to cancel, so ctx is intentionally not threaded through
 	root, err := bld.buildAgent(b.Name, fmt.Sprintf("YAML-defined bot %q", b.Name), b, llm, true)
 	if err != nil {
@@ -130,6 +139,7 @@ type builder struct {
 	probes   []mcpProbe
 	recorder ToolRecorder
 	resolver ModelResolver
+	senders  chat.SenderRegistry
 }
 
 // buildAgent constructs an ADK llmagent for a bot, recursively wrapping each
@@ -139,7 +149,7 @@ type builder struct {
 // for the top-level call so eval recorders fire once per turn at the outer
 // boundary rather than once per sub-agent level.
 //
-//nolint:cyclop // sequential wiring of MCP toolsets, tools, sub-agents, hooks, and recorders reads clearly top-to-bottom
+//nolint:cyclop,gocognit // sequential wiring of MCP toolsets, tools, sub-agents, hooks, and recorders reads clearly top-to-bottom
 func (bld *builder) buildAgent(name, description string, b *bot.Bot, llm adkmodel.LLM, isRoot bool) (agent.Agent, error) {
 	effective := llm
 	if bld.resolver != nil {
@@ -170,7 +180,7 @@ func (bld *builder) buildAgent(name, description string, b *bot.Bot, llm adkmode
 		)
 		switch {
 		case t.Sh != "":
-			built, err = tool.NewShell(t.Name, t.Description, t.Sh, t.Params, t.Returns)
+			built, err = tool.NewShell(t.Name, t.Description, t.Sh, t.Params, t.Returns, bld.senders)
 		case t.Expr != "":
 			built, err = tool.NewExpr(t.Name, t.Description, t.Expr, t.Params)
 		case t.Js != "":
@@ -182,6 +192,14 @@ func (bld *builder) buildAgent(name, description string, b *bot.Bot, llm adkmode
 			return nil, fmt.Errorf("tool %q: %w", t.Name, err)
 		}
 		tools = append(tools, built)
+	}
+
+	if isRoot && len(bld.senders) > 0 {
+		sendTool, err := tool.NewSendMessageTool(bld.senders)
+		if err != nil {
+			return nil, fmt.Errorf("send_message tool: %w", err)
+		}
+		tools = append(tools, sendTool)
 	}
 
 	for key, ref := range b.Agents {

@@ -157,7 +157,7 @@ cron:
          WHERE date(r.remind_at) <= date('now')
            AND r.cadence = 'once';
       SQL
-        signal-cli -a "$SIGNAL_ACCOUNT" send -m "reminder: $body" "$phone" \
+        sa_send signal "$phone" "reminder: $body" \
           && sqlite3 "$db" "DELETE FROM reminders WHERE id=$id;"
       done
 

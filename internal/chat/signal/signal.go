@@ -33,6 +33,11 @@ type Transport struct {
 	// outbound tracks message bodies we recently sent, keyed by body. Used
 	// to suppress sync.sentMessage echoes of our own Note-to-Self replies.
 	outbound sync.Map // string → time.Time
+
+	// senderMu guards the senderCLI pointer. Set while Run is active so
+	// Send can issue outbound JSON-RPC calls on the same signal-cli process.
+	senderMu  sync.Mutex
+	senderCLI *client
 }
 
 // outboundEchoTTL bounds how long we'll treat a sync.sentMessage as an
@@ -104,6 +109,14 @@ func (t *Transport) Run(ctx context.Context, dispatcher chat.Dispatcher) error {
 	go proc.forwardStderr(ctx, log)
 
 	cli := newClient(proc.stdin)
+	t.senderMu.Lock()
+	t.senderCLI = cli
+	t.senderMu.Unlock()
+	defer func() {
+		t.senderMu.Lock()
+		t.senderCLI = nil
+		t.senderMu.Unlock()
+	}()
 	notifs := make(chan frame, 64)
 	readDone := make(chan error, 1)
 	go func() { readDone <- cli.read(proc.stdout, notifs) }()
@@ -393,6 +406,41 @@ func (t *Transport) handleDM(
 		return
 	}
 	peerLog.Info("send ok", "bytes", len(body), "duration", time.Since(sendStart))
+}
+
+// Send dispatches an unsolicited message to a Signal recipient. `to` may
+// be an E.164 phone number (DM) or a base64 group ID (group message).
+// Returns an error if the transport is not currently running.
+//
+// Group IDs in signal-cli are base64 strings that contain characters
+// outside E.164's `+` + digits alphabet; we route to GroupID when `to`
+// does not start with `+`.
+func (t *Transport) Send(_ context.Context, to, text string) error {
+	t.senderMu.Lock()
+	cli := t.senderCLI
+	t.senderMu.Unlock()
+	if cli == nil {
+		return errors.New("signal transport: not running (cannot send)")
+	}
+	if to == "" {
+		return errors.New("signal send: recipient is required")
+	}
+	body := text
+	if t.messagePrefix != "" {
+		body = t.messagePrefix + body
+	}
+	params := sendParams{Message: body}
+	if strings.HasPrefix(to, "+") {
+		params.Recipient = []string{to}
+	} else {
+		params.GroupID = to
+	}
+	t.rememberOutbound(body)
+	_, err := cli.call("send", params)
+	if err != nil {
+		return fmt.Errorf("signal send: %w", err)
+	}
+	return nil
 }
 
 // verboseArgs maps an integer verbosity to signal-cli's repeat-`-v` flag.

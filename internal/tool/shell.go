@@ -31,7 +31,10 @@ type shellResult struct {
 // returns: when set to "markdown", the tool's stdout is post-processed
 // through an HTML-to-Markdown converter before being handed back to the
 // LLM. Empty = passthrough.
-func NewShell(name, description, script string, params map[string]bot.Param, returns string) (adktool.Tool, error) {
+//
+// senders, when non-nil, installs the `sa_send` shell builtin so tool
+// bodies can dispatch outbound messages through any configured transport.
+func NewShell(name, description, script string, params map[string]bot.Param, returns string, senders chat.SenderRegistry) (adktool.Tool, error) {
 	file, err := syntax.NewParser().Parse(strings.NewReader(script), name)
 	if err != nil {
 		return nil, fmt.Errorf("parse script: %w", err)
@@ -53,7 +56,7 @@ func NewShell(name, description, script string, params map[string]bot.Param, ret
 			if err != nil {
 				return shellResult{}, err
 			}
-			output, err := runShellScript(ctx, file, env, name)
+			output, err := runShellScript(ctx, file, env, name, senders)
 			if err != nil {
 				return shellResult{}, err
 			}
@@ -132,13 +135,18 @@ func paramEnvEntries(paramName string, p bot.Param, args map[string]any, atts []
 }
 
 // runShellScript executes a parsed shell AST under mvdan.cc/sh with the
-// supplied env and returns captured stdout.
-func runShellScript(ctx adktool.Context, file *syntax.File, env []string, name string) (string, error) {
+// supplied env and returns captured stdout. When senders is non-nil, the
+// sa_send builtin is available for dispatching outbound messages.
+func runShellScript(ctx adktool.Context, file *syntax.File, env []string, name string, senders chat.SenderRegistry) (string, error) {
 	var stdout, stderr bytes.Buffer
-	runner, err := interp.New(
+	opts := []interp.RunnerOption{
 		interp.Env(expand.ListEnviron(env...)),
 		interp.StdIO(nil, &stdout, &stderr),
-	)
+	}
+	if senders != nil {
+		opts = append(opts, interp.ExecHandlers(SendBuiltinMiddleware(senders)))
+	}
+	runner, err := interp.New(opts...)
 	if err != nil {
 		return "", fmt.Errorf("%s: %w", name, err)
 	}

@@ -6,6 +6,7 @@ package cron
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -29,19 +30,23 @@ type Runner interface {
 // cadences. Construct with New, stage entries via Register, then call Run
 // from a goroutine — it blocks until its context is cancelled.
 type Scheduler struct {
-	logger *slog.Logger
-	c      *robcron.Cron
-	jobs   int
+	logger  *slog.Logger
+	c       *robcron.Cron
+	jobs    int
+	senders chat.SenderRegistry
 }
 
-// New returns a Scheduler with no staged jobs.
-func New(logger *slog.Logger) *Scheduler {
+// New returns a Scheduler with no staged jobs. When senders is non-nil,
+// cron sh: bodies get the `sa_send` shell builtin and cron expr:/js:
+// bodies get a `send_message(transport, to, body)` binding.
+func New(logger *slog.Logger, senders chat.SenderRegistry) *Scheduler {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	return &Scheduler{
-		logger: logger,
-		c:      robcron.New(),
+		logger:  logger,
+		c:       robcron.New(),
+		senders: senders,
 	}
 }
 
@@ -65,7 +70,7 @@ func (s *Scheduler) Register(b *bot.Bot, rt Runner) error {
 			"bot", b.Name,
 			"cron", entry.Name,
 		)
-		job := makeJob(entry, b.Name, rt, logger)
+		job := makeJob(entry, b.Name, rt, s.senders, logger)
 		wrapped := robcron.NewChain(robcron.SkipIfStillRunning(slogPrintfAdapter{logger})).Then(job)
 		s.c.Schedule(sched, wrapped)
 		s.jobs++
@@ -100,18 +105,18 @@ func buildSchedule(c bot.Cron) (robcron.Schedule, error) {
 		}
 		return robcron.Every(d), nil
 	}
-	return nil, fmt.Errorf("no schedule or every set")
+	return nil, errors.New("no schedule or every set")
 }
 
 // makeJob returns the robcron.Job closure that runs when the cadence fires.
-func makeJob(entry bot.Cron, botName string, rt Runner, logger *slog.Logger) robcron.Job {
+func makeJob(entry bot.Cron, botName string, rt Runner, senders chat.SenderRegistry, logger *slog.Logger) robcron.Job {
 	mode, trigger := describe(entry)
 	return robcron.FuncJob(func() {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		start := time.Now()
 		logger.Debug("fire", "mode", mode, "trigger", trigger)
-		bytesOut, err := runEntry(ctx, entry, botName, rt)
+		bytesOut, err := runEntry(ctx, entry, botName, rt, senders)
 		dur := time.Since(start)
 		if err != nil {
 			logger.Error("fire failed",
@@ -150,18 +155,18 @@ func describe(c bot.Cron) (mode, trigger string) {
 
 // runEntry dispatches the entry to its executor and returns the number of
 // output bytes produced.
-func runEntry(ctx context.Context, entry bot.Cron, botName string, rt Runner) (int, error) {
+func runEntry(ctx context.Context, entry bot.Cron, botName string, rt Runner, senders chat.SenderRegistry) (int, error) {
 	switch {
 	case entry.Prompt != "":
 		return runPrompt(ctx, entry, botName, rt)
 	case entry.Sh != "":
-		out, err := tool.RunShellScript(ctx, entry.Sh, entry.Name)
+		out, err := tool.RunShellScript(ctx, entry.Sh, entry.Name, senders)
 		return len(out), err
 	case entry.Expr != "":
-		out, err := tool.RunExpr(ctx, entry.Expr, entry.Name)
+		out, err := tool.RunExpr(ctx, entry.Expr, entry.Name, senders)
 		return len(out), err
 	case entry.Js != "":
-		out, err := tool.RunJs(ctx, entry.Js, entry.Name)
+		out, err := tool.RunJs(ctx, entry.Js, entry.Name, senders)
 		return len(out), err
 	}
 	return 0, fmt.Errorf("cron entry %q has no directive", entry.Name)

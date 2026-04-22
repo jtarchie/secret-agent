@@ -1,7 +1,10 @@
 // Package chat defines the pluggable chat transport interface.
 package chat
 
-import "context"
+import (
+	"context"
+	"errors"
+)
 
 // Chunk is one piece of a streaming bot reply. A non-nil Err is terminal;
 // the channel is closed immediately after.
@@ -59,3 +62,22 @@ type Dispatcher interface {
 type Transport interface {
 	Run(ctx context.Context, d Dispatcher) error
 }
+
+// ErrSendUnsupported is returned by Sender.Send on transports that cannot
+// push unsolicited messages (e.g. the CLI TUI).
+var ErrSendUnsupported = errors.New("transport does not support outbound send")
+
+// Sender pushes an unsolicited message to a recipient without a prior
+// incoming message. It is satisfied by every real transport; the CLI
+// transport returns ErrSendUnsupported. The `to` format is transport-
+// specific: E.164 phone or base64 group-id for Signal; U.../C.../D... IDs
+// for Slack; E.164/email or chat GUID for iMessage.
+type Sender interface {
+	Send(ctx context.Context, to string, text string) error
+}
+
+// SenderRegistry maps a transport's configured `type:` string ("signal",
+// "slack", "imessage", "cli") to its Sender. Used by the cron scheduler
+// and by the built-in send_message tool/shell builtin so a bot can reply
+// to a specific recipient via any configured transport.
+type SenderRegistry map[string]Sender

@@ -499,6 +499,14 @@ func normalizeCron(c *Cron) error {
 		return fmt.Errorf("name %q must match [A-Za-z_][A-Za-z0-9_]*", c.Name)
 	}
 
+	err := validateCronCadence(c)
+	if err != nil {
+		return err
+	}
+	return validateCronBody(c)
+}
+
+func validateCronCadence(c *Cron) error {
 	switch {
 	case c.Schedule != "" && c.Every != "":
 		return errors.New("only one of schedule or every may be set")
@@ -518,7 +526,10 @@ func normalizeCron(c *Cron) error {
 			return fmt.Errorf("every %q: minimum interval is 1s", c.Every)
 		}
 	}
+	return nil
+}
 
+func validateCronBody(c *Cron) error {
 	set := []string{}
 	if c.Prompt != "" {
 		set = append(set, "prompt")

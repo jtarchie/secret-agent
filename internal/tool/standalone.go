@@ -13,22 +13,29 @@ import (
 	"mvdan.cc/sh/v3/expand"
 	"mvdan.cc/sh/v3/interp"
 	"mvdan.cc/sh/v3/syntax"
+
+	"github.com/jtarchie/secret-agent/internal/chat"
 )
 
 // RunShellScript executes a standalone shell script under mvdan.cc/sh with
 // the process environment, returning captured stdout. It is intended for
 // non-tool execution paths (e.g. the cron scheduler) where no params,
-// attachments, or sender identity are available.
-func RunShellScript(ctx context.Context, script, name string) (string, error) {
+// attachments, or sender identity are available. When senders is non-nil,
+// the `sa_send` shell builtin is available to dispatch outbound messages.
+func RunShellScript(ctx context.Context, script, name string, senders chat.SenderRegistry) (string, error) {
 	file, err := syntax.NewParser().Parse(strings.NewReader(script), name)
 	if err != nil {
 		return "", fmt.Errorf("%s: parse script: %w", name, err)
 	}
 	var stdout, stderr bytes.Buffer
-	runner, err := interp.New(
+	opts := []interp.RunnerOption{
 		interp.Env(expand.ListEnviron(os.Environ()...)),
 		interp.StdIO(nil, &stdout, &stderr),
-	)
+	}
+	if senders != nil {
+		opts = append(opts, interp.ExecHandlers(SendBuiltinMiddleware(senders)))
+	}
+	runner, err := interp.New(opts...)
 	if err != nil {
 		return "", fmt.Errorf("%s: %w", name, err)
 	}
@@ -39,14 +46,22 @@ func RunShellScript(ctx context.Context, script, name string) (string, error) {
 	return stdout.String(), nil
 }
 
-// RunExpr evaluates an expr-lang expression with no bindings and returns
-// the JSON-marshaled result as a string.
-func RunExpr(_ context.Context, code, name string) (string, error) {
+// RunExpr evaluates an expr-lang expression and returns the JSON-marshaled
+// result as a string. When senders is non-nil, a `send_message(transport,
+// to, body)` function is bound into the evaluation env.
+func RunExpr(ctx context.Context, code, name string, senders chat.SenderRegistry) (string, error) {
 	program, err := expr.Compile(code, expr.AllowUndefinedVariables())
 	if err != nil {
 		return "", fmt.Errorf("%s: compile expr: %w", name, err)
 	}
-	v, err := expr.Run(program, map[string]any{})
+	env := map[string]any{}
+	if senders != nil {
+		env["send_message"] = func(transport, to, body string) (string, error) {
+			dispatchErr := DispatchSend(ctx, senders, transport, to, body)
+			return MarshalSendResult(dispatchErr)
+		}
+	}
+	v, err := expr.Run(program, env)
 	if err != nil {
 		return "", fmt.Errorf("%s: expr run: %w", name, err)
 	}
@@ -57,15 +72,26 @@ func RunExpr(_ context.Context, code, name string) (string, error) {
 	return string(b), nil
 }
 
-// RunJs evaluates a JavaScript program in a fresh goja VM with no bindings
-// and returns the JSON-marshaled completion value as a string. The VM is
-// interrupted if ctx is cancelled.
-func RunJs(ctx context.Context, code, name string) (string, error) {
+// RunJs evaluates a JavaScript program in a fresh goja VM and returns the
+// JSON-marshaled completion value as a string. The VM is interrupted if
+// ctx is cancelled. When senders is non-nil, a `send_message(transport,
+// to, body)` function is bound on the VM.
+func RunJs(ctx context.Context, code, name string, senders chat.SenderRegistry) (string, error) {
 	program, err := goja.Compile(name, code, true)
 	if err != nil {
 		return "", fmt.Errorf("%s: compile js: %w", name, err)
 	}
 	vm := goja.New()
+	if senders != nil {
+		err := vm.Set("send_message", func(transport, to, body string) string {
+			dispatchErr := DispatchSend(ctx, senders, transport, to, body)
+			out, _ := MarshalSendResult(dispatchErr)
+			return out
+		})
+		if err != nil {
+			return "", fmt.Errorf("%s: bind send_message: %w", name, err)
+		}
+	}
 	done := make(chan struct{})
 	defer close(done)
 	go func() {

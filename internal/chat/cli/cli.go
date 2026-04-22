@@ -57,6 +57,12 @@ func New(opts ...Option) *Transport {
 // so it synthesizes a stub envelope for every send.
 type handlerFunc func(ctx context.Context, msg chat.Message) <-chan chat.Chunk
 
+// Send is not supported by the CLI transport because it is an interactive
+// TUI without a persistent outbound channel. Returns chat.ErrSendUnsupported.
+func (t *Transport) Send(_ context.Context, _, _ string) error {
+	return chat.ErrSendUnsupported
+}
+
 func (t *Transport) Run(ctx context.Context, d chat.Dispatcher) error {
 	handler := handlerFunc(func(ctx context.Context, msg chat.Message) <-chan chat.Chunk {
 		return d.Dispatch(ctx, chat.Envelope{ConvID: "local", Kind: "cli", Transport: "cli"}, msg)

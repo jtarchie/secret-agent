@@ -112,10 +112,19 @@ func (c *RunCmd) Run() error {
 		return llm, nil
 	}
 
-	scheduler := cronpkg.New(logger)
+	transports, err := buildTransports(cfg, logger, topBots, c.Verbose)
+	if err != nil {
+		return err
+	}
+	senders := buildSenderRegistry(cfg, transports)
+
+	scheduler := cronpkg.New(logger, senders)
 	routes := make([]router.Route, 0, len(topBots))
 	for _, b := range topBots {
-		rt, err := runtime.New(ctx, b, llm, runtime.WithModelResolver(resolver))
+		rt, err := runtime.New(ctx, b, llm,
+			runtime.WithModelResolver(resolver),
+			runtime.WithSenderRegistry(senders),
+		)
 		if err != nil {
 			return fmt.Errorf("runtime for bot %q: %w", b.Name, err)
 		}
@@ -141,11 +150,6 @@ func (c *RunCmd) Run() error {
 		return fmt.Errorf("build router: %w", err)
 	}
 
-	transports, err := buildTransports(cfg, logger, routes, c.Verbose)
-	if err != nil {
-		return err
-	}
-
 	g, gctx := errgroup.WithContext(ctx)
 	for _, tp := range transports {
 		tp := tp
@@ -161,17 +165,37 @@ func (c *RunCmd) Run() error {
 	return nil
 }
 
-// buildTransports instantiates each transport from the config. The routes
-// slice is used to pick a bot name for the CLI transport's TUI label.
-func buildTransports(cfg *config.Config, logger *slog.Logger, routes []router.Route, verbose int) ([]chat.Transport, error) {
+// buildSenderRegistry walks the configured transports and maps each
+// transport's `type:` string to its chat.Sender. Transports that can
+// send (Signal/Slack/iMessage) are indexed; the CLI transport is also
+// indexed so tools can discover it exists — its Send returns
+// chat.ErrSendUnsupported at call time.
+func buildSenderRegistry(cfg *config.Config, transports []chat.Transport) chat.SenderRegistry {
+	reg := make(chat.SenderRegistry, len(transports))
+	for i, t := range cfg.Transports {
+		if i >= len(transports) {
+			break
+		}
+		sender, ok := transports[i].(chat.Sender)
+		if !ok {
+			continue
+		}
+		reg[string(t.Type)] = sender
+	}
+	return reg
+}
+
+// buildTransports instantiates each transport from the config. topBots is
+// used to pick a bot name for the CLI transport's TUI label.
+func buildTransports(cfg *config.Config, logger *slog.Logger, topBots []*bot.Bot, verbose int) ([]chat.Transport, error) {
 	out := make([]chat.Transport, 0, len(cfg.Transports))
 	for _, t := range cfg.Transports {
 		switch t.Type {
 		case config.TransportCLI:
-			if len(routes) > 1 {
-				return nil, fmt.Errorf("transport cli requires exactly one bot (got %d)", len(routes))
+			if len(topBots) > 1 {
+				return nil, fmt.Errorf("transport cli requires exactly one bot (got %d)", len(topBots))
 			}
-			opts := []cli.Option{cli.WithBotName(routes[0].Bot.Name)}
+			opts := []cli.Option{cli.WithBotName(topBots[0].Name)}
 			if t.MessagePrefix != "" {
 				opts = append(opts, cli.WithMessagePrefix(t.MessagePrefix))
 			}
