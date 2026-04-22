@@ -189,16 +189,17 @@ func buildTransports(cfg *config.Config, logger *slog.Logger, routes []router.Ro
 			out = append(out, slacktransport.New(t.BotToken, t.AppToken, opts...))
 		case config.TransportIMessage:
 			opts := []imessagetransport.Option{imessagetransport.WithLogger(logger)}
-			if t.WebhookListen != "" {
-				opts = append(opts, imessagetransport.WithWebhookListen(t.WebhookListen))
-			}
-			if t.WebhookPath != "" {
-				opts = append(opts, imessagetransport.WithWebhookPath(t.WebhookPath))
+			if t.PollInterval != "" {
+				d, err := time.ParseDuration(t.PollInterval)
+				if err != nil {
+					return nil, fmt.Errorf("imessage poll_interval %q: %w", t.PollInterval, err)
+				}
+				opts = append(opts, imessagetransport.WithPollInterval(d))
 			}
 			if t.MessagePrefix != "" {
 				opts = append(opts, imessagetransport.WithMessagePrefix(t.MessagePrefix))
 			}
-			out = append(out, imessagetransport.New(t.ServerURL, t.Password, t.StateDir, opts...))
+			out = append(out, imessagetransport.New(t.DatabasePath, t.StateDir, opts...))
 		default:
 			return nil, fmt.Errorf("unknown transport type %q", t.Type)
 		}

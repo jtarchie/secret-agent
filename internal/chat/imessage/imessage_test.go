@@ -1,15 +1,13 @@
 package imessage
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
-	"io"
+	"fmt"
 	"log/slog"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -20,8 +18,23 @@ import (
 
 func nullLogger() *slog.Logger { return slog.New(slog.DiscardHandler) }
 
-// fakeDispatcher records the envelope/message received and replies with a
-// canned body on a goroutine-managed channel.
+// writeScript writes a small POSIX shell script to a temp file and returns
+// its path. Used to stand in for the sqlite3 / osascript binaries in tests.
+func writeScript(t *testing.T, body string) string {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-script stubs assume a POSIX shell")
+	}
+	p := filepath.Join(t.TempDir(), "stub.sh")
+	err := os.WriteFile(p, []byte("#!/bin/sh\n"+body+"\n"), 0o700)
+	if err != nil {
+		t.Fatalf("write stub: %v", err)
+	}
+	return p
+}
+
+// fakeDispatcher captures the envelopes it sees and replies with a canned
+// body on a per-call buffered channel.
 type fakeDispatcher struct {
 	mu    sync.Mutex
 	calls []dispatchCall
@@ -33,7 +46,7 @@ type dispatchCall struct {
 	msg chat.Message
 }
 
-func (f *fakeDispatcher) Dispatch(ctx context.Context, env chat.Envelope, msg chat.Message) <-chan chat.Chunk {
+func (f *fakeDispatcher) Dispatch(_ context.Context, env chat.Envelope, msg chat.Message) <-chan chat.Chunk {
 	f.mu.Lock()
 	f.calls = append(f.calls, dispatchCall{env: env, msg: msg})
 	reply := f.reply
@@ -63,18 +76,18 @@ func (f *fakeDispatcher) waitFor(t *testing.T, n int) {
 }
 
 func TestBuildEnvelopeDM(t *testing.T) {
-	d := newMessageData{
-		GUID:   "msg-1",
-		Text:   "hi",
-		Handle: &handle{Address: "+15551234567"},
-		Chats: []chatRef{{
-			GUID:         "any;-;+15551234567",
-			Participants: []participant{{Address: "+15551234567"}},
-		}},
+	r := row{
+		ROWID:            42,
+		MsgGUID:          "msg-1",
+		Text:             "hi",
+		SenderAddress:    "+15551234567",
+		ChatGUID:         "any;-;+15551234567",
+		ChatStyle:        45,
+		ParticipantCount: 1,
 	}
-	env := buildEnvelope(d)
+	env := buildEnvelope(r)
 	if env.Transport != "imessage" {
-		t.Errorf("Transport = %q, want imessage", env.Transport)
+		t.Errorf("Transport = %q", env.Transport)
 	}
 	if env.Kind != "dm" {
 		t.Errorf("Kind = %q, want dm", env.Kind)
@@ -82,333 +95,306 @@ func TestBuildEnvelopeDM(t *testing.T) {
 	if env.ConvID != "any;-;+15551234567" {
 		t.Errorf("ConvID = %q", env.ConvID)
 	}
-	if env.SenderID != "+15551234567" {
-		t.Errorf("SenderID = %q", env.SenderID)
-	}
-	if env.SenderPhone != "+15551234567" {
-		t.Errorf("SenderPhone = %q, want E.164", env.SenderPhone)
+	if env.SenderID != "+15551234567" || env.SenderPhone != "+15551234567" {
+		t.Errorf("sender fields = %+v", env)
 	}
 	if env.GroupID != "" {
-		t.Errorf("GroupID = %q, want empty for DM", env.GroupID)
+		t.Errorf("GroupID should be empty for DM: %q", env.GroupID)
 	}
 }
 
-func TestBuildEnvelopeGroup(t *testing.T) {
-	d := newMessageData{
-		Handle: &handle{Address: "+15551234567"},
-		Chats: []chatRef{{
-			GUID: "iMessage;+;chat123",
-			Participants: []participant{
-				{Address: "+15551234567"},
-				{Address: "+15559876543"},
-				{Address: "other@example.com"},
-			},
-		}},
+func TestBuildEnvelopeGroupByStyle(t *testing.T) {
+	r := row{
+		ChatGUID:         "iMessage;+;chat123",
+		ChatStyle:        43,
+		ParticipantCount: 1,
+		SenderAddress:    "+15551234567",
 	}
-	env := buildEnvelope(d)
+	env := buildEnvelope(r)
+	if env.Kind != "group" || env.GroupID != "iMessage;+;chat123" {
+		t.Errorf("expected group envelope, got %+v", env)
+	}
+}
+
+func TestBuildEnvelopeGroupByParticipantCount(t *testing.T) {
+	// Style is DM-ish but participant count > 1 — still classify as group.
+	r := row{
+		ChatGUID:         "iMessage;+;chat999",
+		ChatStyle:        0,
+		ParticipantCount: 3,
+		SenderAddress:    "+15551234567",
+	}
+	env := buildEnvelope(r)
 	if env.Kind != "group" {
-		t.Errorf("Kind = %q, want group", env.Kind)
-	}
-	if env.GroupID != "iMessage;+;chat123" || env.ConvID != "iMessage;+;chat123" {
-		t.Errorf("GroupID/ConvID = %q/%q", env.GroupID, env.ConvID)
+		t.Errorf("expected group (participants>1), got %q", env.Kind)
 	}
 }
 
 func TestBuildEnvelopeEmailSenderLeavesPhoneEmpty(t *testing.T) {
-	d := newMessageData{
-		Handle: &handle{Address: "person@icloud.com"},
-		Chats: []chatRef{{
-			GUID:         "iMessage;-;person@icloud.com",
-			Participants: []participant{{Address: "person@icloud.com"}},
-		}},
+	r := row{
+		ChatGUID:      "iMessage;-;person@icloud.com",
+		SenderAddress: "person@icloud.com",
+		ChatStyle:     45,
 	}
-	env := buildEnvelope(d)
+	env := buildEnvelope(r)
 	if env.SenderID != "person@icloud.com" {
 		t.Errorf("SenderID = %q", env.SenderID)
 	}
 	if env.SenderPhone != "" {
-		t.Errorf("SenderPhone should be empty for email senders, got %q", env.SenderPhone)
+		t.Errorf("SenderPhone should be empty for email, got %q", env.SenderPhone)
 	}
 }
 
-func TestClientSendTextHitsExpectedEndpoint(t *testing.T) {
-	var gotMethod, gotPath, gotPassword, gotBody string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotMethod = r.Method
-		gotPath = r.URL.Path
-		gotPassword = r.URL.Query().Get("password")
-		raw, _ := io.ReadAll(r.Body)
-		gotBody = string(raw)
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer srv.Close()
-
-	cli := newClient(srv.URL, "pw!with space", srv.Client())
-	err := cli.sendText(context.Background(), "any;-;+15551234567", "temp-xyz", "hello")
+func TestCursorRoundTrip(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "cursor")
+	err := saveCursor(p, 12345)
 	if err != nil {
-		t.Fatalf("sendText: %v", err)
+		t.Fatalf("save: %v", err)
 	}
-	if gotMethod != http.MethodPost {
-		t.Errorf("method = %q", gotMethod)
-	}
-	if gotPath != "/api/v1/message/text" {
-		t.Errorf("path = %q", gotPath)
-	}
-	if gotPassword != "pw!with space" {
-		t.Errorf("password query = %q (should be URL-decoded to original)", gotPassword)
-	}
-	var decoded map[string]string
-	err = json.Unmarshal([]byte(gotBody), &decoded)
+	got, err := loadCursor(p)
 	if err != nil {
-		t.Fatalf("body not json: %q", gotBody)
+		t.Fatalf("load: %v", err)
 	}
-	if decoded["chatGuid"] != "any;-;+15551234567" || decoded["tempGuid"] != "temp-xyz" || decoded["message"] != "hello" {
-		t.Errorf("body fields wrong: %+v", decoded)
-	}
-}
-
-func TestClientSendTextReturnsErrorOnNon2xx(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusBadRequest)
-		_, _ = w.Write([]byte("chat not found"))
-	}))
-	defer srv.Close()
-
-	cli := newClient(srv.URL, "pw", srv.Client())
-	err := cli.sendText(context.Background(), "bad-chat", "t", "x")
-	if err == nil {
-		t.Fatal("expected error on 400")
-	}
-	if !strings.Contains(err.Error(), "400") || !strings.Contains(err.Error(), "chat not found") {
-		t.Errorf("error should name status + body, got: %v", err)
+	if got != 12345 {
+		t.Errorf("roundtrip: got %d", got)
 	}
 }
 
-func TestClientDownloadAttachmentWritesFile(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !strings.HasPrefix(r.URL.Path, "/api/v1/attachment/") {
-			http.Error(w, "wrong path", http.StatusNotFound)
-			return
+func TestLoadCursorMissingFileIsZero(t *testing.T) {
+	got, err := loadCursor(filepath.Join(t.TempDir(), "nope"))
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if got != 0 {
+		t.Errorf("missing cursor should be 0, got %d", got)
+	}
+}
+
+func TestStyleIsGroup(t *testing.T) {
+	cases := map[int]bool{43: true, 45: false, 0: false}
+	for style, want := range cases {
+		if got := styleIsGroup(style); got != want {
+			t.Errorf("styleIsGroup(%d) = %v, want %v", style, got, want)
 		}
-		_, _ = w.Write([]byte("PNGDATA"))
-	}))
-	defer srv.Close()
-
-	dest := filepath.Join(t.TempDir(), "sub", "photo.png")
-	cli := newClient(srv.URL, "pw", srv.Client())
-	err := cli.downloadAttachment(context.Background(), "ATT-1", dest)
-	if err != nil {
-		t.Fatalf("download: %v", err)
-	}
-	got, err := os.ReadFile(dest)
-	if err != nil {
-		t.Fatalf("read back: %v", err)
-	}
-	if string(got) != "PNGDATA" {
-		t.Errorf("file = %q", string(got))
 	}
 }
 
-// TestWebhookHandlerDispatchesNewMessage runs a full round-trip: post a
-// webhook payload, wait for the dispatcher to see it, and confirm the
-// reply was sent back via the REST endpoint.
-func TestWebhookHandlerDispatchesNewMessage(t *testing.T) {
-	var sendBody bytes.Buffer
-	sendHits := make(chan struct{}, 1)
-	bb := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/api/v1/message/text" {
-			_, _ = io.Copy(&sendBody, r.Body)
-			w.WriteHeader(http.StatusOK)
-			sendHits <- struct{}{}
-			return
-		}
-		http.Error(w, "unexpected path "+r.URL.Path, http.StatusNotFound)
-	}))
-	defer bb.Close()
+// sqliteStubEmitting returns a shell-script path that emits the given JSON
+// on stdout when invoked — regardless of arguments.
+func sqliteStubEmitting(t *testing.T, rows []row) string {
+	t.Helper()
+	raw, err := json.Marshal(rows)
+	if err != nil {
+		t.Fatalf("marshal fixtures: %v", err)
+	}
+	// Shell-quote the JSON by wrapping in single quotes and escaping any
+	// embedded single quotes. Simple approach is fine for test fixtures.
+	body := fmt.Sprintf("cat <<'EOF'\n%s\nEOF", string(raw))
+	return writeScript(t, body)
+}
+
+// osascriptStubRecording returns a shell-script path that, when invoked,
+// appends a line describing its arguments to a log file. The log path is
+// returned alongside the script path.
+func osascriptStubRecording(t *testing.T) (scriptPath, logPath string) {
+	t.Helper()
+	log := filepath.Join(t.TempDir(), "osascript.log")
+	// Write the full argv (quoted) plus a blank line; mixes cleanly with
+	// downstream string checks.
+	body := `echo "args: $@" >> ` + log + `
+while IFS= read -r line; do echo "stdin: $line" >> ` + log + `; done`
+	return writeScript(t, body), log
+}
+
+func TestPollOnceDispatchesAndSends(t *testing.T) {
+	rows := []row{{
+		ROWID:            101,
+		MsgGUID:          "msg-a",
+		Text:             "ping",
+		IsFromMe:         0,
+		SenderAddress:    "+15551234567",
+		ChatGUID:         "any;-;+15551234567",
+		ChatStyle:        45,
+		ParticipantCount: 1,
+	}}
+	sqlite := sqliteStubEmitting(t, rows)
+	osa, osaLog := osascriptStubRecording(t)
 
 	disp := &fakeDispatcher{reply: "pong"}
-
-	tr := New(bb.URL, "pw", t.TempDir(),
+	tr := New("/ignored/chat.db", t.TempDir(),
 		WithLogger(nullLogger()),
-		WithHTTPClient(bb.Client()),
-		WithWebhookListen("127.0.0.1:0"),
+		WithSQLiteBinary(sqlite),
+		WithOsascriptBinary(osa),
 	)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	runDone := make(chan error, 1)
-	go func() { runDone <- tr.Run(ctx, disp) }()
-
-	// Give the listener a moment to bind. Use a httptest.Server bound to the
-	// same handler as an easier end-run: call handleWebhook directly with a
-	// recorded request instead of racing the real port.
-	cli := newClient(bb.URL, "pw", bb.Client())
 	lockFor := func(string) *sync.Mutex { return &sync.Mutex{} }
 
-	payload := webhookEvent{
-		Type: "new-message",
-		Data: newMessageData{
-			GUID:   "msg-1",
-			Text:   "ping",
-			Handle: &handle{Address: "+15551234567"},
-			Chats: []chatRef{{
-				GUID:         "any;-;+15551234567",
-				Participants: []participant{{Address: "+15551234567"}},
-			}},
-		},
+	newCursor, err := tr.pollOnce(context.Background(), nullLogger(), disp, 0, lockFor)
+	if err != nil {
+		t.Fatalf("pollOnce: %v", err)
 	}
-	raw, _ := json.Marshal(payload)
-	req := httptest.NewRequest(http.MethodPost, "/imessage-webhook", bytes.NewReader(raw))
-	rr := httptest.NewRecorder()
-
-	tr.handleWebhook(ctx, nullLogger(), cli, disp, lockFor, rr, req)
-	if rr.Code != http.StatusOK {
-		t.Fatalf("webhook response: %d", rr.Code)
+	if newCursor != 101 {
+		t.Errorf("cursor = %d, want 101", newCursor)
 	}
-
 	disp.waitFor(t, 1)
 
-	select {
-	case <-sendHits:
-	case <-time.After(2 * time.Second):
-		t.Fatalf("expected send to BlueBubbles REST, none arrived")
+	// Give the send goroutine a moment to shell out.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		b, _ := os.ReadFile(osaLog)
+		if strings.Contains(string(b), "+15551234567") && strings.Contains(string(b), "pong") {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
+	b, _ := os.ReadFile(osaLog)
+	t.Fatalf("osascript log missing expected recipient/body. Got: %s", b)
+}
 
-	var got map[string]string
-	err := json.Unmarshal(sendBody.Bytes(), &got)
+func TestPollOnceSkipsIsFromMe(t *testing.T) {
+	rows := []row{{
+		ROWID:         202,
+		Text:          "self-reply",
+		IsFromMe:      1,
+		SenderAddress: "",
+		ChatGUID:      "any;-;+15551234567",
+	}}
+	sqlite := sqliteStubEmitting(t, rows)
+	osa, _ := osascriptStubRecording(t)
+
+	disp := &fakeDispatcher{}
+	tr := New("/ignored/chat.db", t.TempDir(),
+		WithLogger(nullLogger()),
+		WithSQLiteBinary(sqlite),
+		WithOsascriptBinary(osa),
+	)
+	lockFor := func(string) *sync.Mutex { return &sync.Mutex{} }
+
+	newCursor, err := tr.pollOnce(context.Background(), nullLogger(), disp, 0, lockFor)
 	if err != nil {
-		t.Fatalf("send body not json: %q", sendBody.String())
+		t.Fatalf("pollOnce: %v", err)
 	}
-	if got["chatGuid"] != "any;-;+15551234567" || got["message"] != "pong" {
-		t.Errorf("send body wrong: %+v", got)
-	}
-
-	cancel()
-	select {
-	case <-runDone:
-	case <-time.After(2 * time.Second):
-		t.Fatalf("Run did not exit after cancel")
-	}
-}
-
-func TestWebhookHandlerIgnoresIsFromMe(t *testing.T) {
-	disp := &fakeDispatcher{reply: "nope"}
-	tr := New("http://ignored", "pw", t.TempDir(), WithLogger(nullLogger()))
-
-	payload := webhookEvent{
-		Type: "new-message",
-		Data: newMessageData{
-			GUID:     "msg-echo",
-			Text:     "my own reply",
-			IsFromMe: true,
-			Handle:   &handle{Address: "+15551234567"},
-			Chats:    []chatRef{{GUID: "any;-;+15551234567"}},
-		},
-	}
-	raw, _ := json.Marshal(payload)
-	req := httptest.NewRequest(http.MethodPost, "/imessage-webhook", bytes.NewReader(raw))
-	rr := httptest.NewRecorder()
-
-	tr.handleWebhook(context.Background(), nullLogger(), nil, disp, func(string) *sync.Mutex { return &sync.Mutex{} }, rr, req)
-
-	if rr.Code != http.StatusOK {
-		t.Errorf("should ack anyway, got %d", rr.Code)
+	if newCursor != 202 {
+		t.Errorf("cursor should still advance past skipped rows: %d", newCursor)
 	}
 	disp.mu.Lock()
 	defer disp.mu.Unlock()
 	if len(disp.calls) != 0 {
-		t.Errorf("isFromMe event should not reach dispatcher: got %d calls", len(disp.calls))
+		t.Errorf("isFromMe=1 should not dispatch: got %d calls", len(disp.calls))
 	}
 }
 
-func TestWebhookHandlerRejectsNonPost(t *testing.T) {
-	tr := New("http://ignored", "pw", t.TempDir(), WithLogger(nullLogger()))
+func TestPollOnceSkipsEmptyText(t *testing.T) {
+	rows := []row{{
+		ROWID:         303,
+		Text:          "   ",
+		IsFromMe:      0,
+		SenderAddress: "+15551234567",
+		ChatGUID:      "any;-;+15551234567",
+		ChatStyle:     45,
+	}}
+	sqlite := sqliteStubEmitting(t, rows)
+	osa, _ := osascriptStubRecording(t)
+
 	disp := &fakeDispatcher{}
+	tr := New("/ignored/chat.db", t.TempDir(),
+		WithLogger(nullLogger()),
+		WithSQLiteBinary(sqlite),
+		WithOsascriptBinary(osa),
+	)
+	lockFor := func(string) *sync.Mutex { return &sync.Mutex{} }
 
-	req := httptest.NewRequest(http.MethodGet, "/imessage-webhook", nil)
-	rr := httptest.NewRecorder()
-	tr.handleWebhook(context.Background(), nullLogger(), nil, disp, func(string) *sync.Mutex { return &sync.Mutex{} }, rr, req)
-
-	if rr.Code != http.StatusMethodNotAllowed {
-		t.Errorf("code = %d, want 405", rr.Code)
-	}
-}
-
-func TestWebhookHandlerDropsEmptyMessage(t *testing.T) {
-	disp := &fakeDispatcher{}
-	tr := New("http://ignored", "pw", t.TempDir(), WithLogger(nullLogger()))
-
-	payload := webhookEvent{
-		Type: "new-message",
-		Data: newMessageData{
-			GUID:   "msg-empty",
-			Text:   "   ",
-			Handle: &handle{Address: "+15551234567"},
-			Chats:  []chatRef{{GUID: "any;-;+15551234567"}},
-		},
-	}
-	raw, _ := json.Marshal(payload)
-	req := httptest.NewRequest(http.MethodPost, "/imessage-webhook", bytes.NewReader(raw))
-	rr := httptest.NewRecorder()
-
-	tr.handleWebhook(context.Background(), nullLogger(), nil, disp, func(string) *sync.Mutex { return &sync.Mutex{} }, rr, req)
-	if rr.Code != http.StatusOK {
-		t.Errorf("should ack anyway, got %d", rr.Code)
+	_, err := tr.pollOnce(context.Background(), nullLogger(), disp, 0, lockFor)
+	if err != nil {
+		t.Fatalf("pollOnce: %v", err)
 	}
 	disp.mu.Lock()
 	defer disp.mu.Unlock()
 	if len(disp.calls) != 0 {
-		t.Errorf("empty message should not reach dispatcher: got %d calls", len(disp.calls))
+		t.Errorf("empty text should not dispatch: got %d calls", len(disp.calls))
 	}
 }
 
-func TestWebhookHandlerAppliesMessagePrefix(t *testing.T) {
-	var sendBody bytes.Buffer
-	sendHits := make(chan struct{}, 1)
-	bb := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = io.Copy(&sendBody, r.Body)
-		w.WriteHeader(http.StatusOK)
-		sendHits <- struct{}{}
-	}))
-	defer bb.Close()
+func TestMessagePrefixAppliedOnSend(t *testing.T) {
+	rows := []row{{
+		ROWID:            404,
+		Text:             "hi",
+		SenderAddress:    "+15551234567",
+		ChatGUID:         "any;-;+15551234567",
+		ChatStyle:        45,
+		ParticipantCount: 1,
+	}}
+	sqlite := sqliteStubEmitting(t, rows)
+	osa, osaLog := osascriptStubRecording(t)
 
 	disp := &fakeDispatcher{reply: "hello"}
-	tr := New(bb.URL, "pw", t.TempDir(),
+	tr := New("/ignored/chat.db", t.TempDir(),
 		WithLogger(nullLogger()),
-		WithHTTPClient(bb.Client()),
+		WithSQLiteBinary(sqlite),
+		WithOsascriptBinary(osa),
 		WithMessagePrefix("[bot] "),
 	)
-	cli := newClient(bb.URL, "pw", bb.Client())
+	lockFor := func(string) *sync.Mutex { return &sync.Mutex{} }
 
-	payload := webhookEvent{
-		Type: "new-message",
-		Data: newMessageData{
-			GUID:   "msg-p",
-			Text:   "hi",
-			Handle: &handle{Address: "+15551234567"},
-			Chats: []chatRef{{
-				GUID:         "any;-;+15551234567",
-				Participants: []participant{{Address: "+15551234567"}},
-			}},
-		},
-	}
-	raw, _ := json.Marshal(payload)
-	req := httptest.NewRequest(http.MethodPost, "/imessage-webhook", bytes.NewReader(raw))
-	rr := httptest.NewRecorder()
-	tr.handleWebhook(context.Background(), nullLogger(), cli, disp, func(string) *sync.Mutex { return &sync.Mutex{} }, rr, req)
-
-	select {
-	case <-sendHits:
-	case <-time.After(2 * time.Second):
-		t.Fatal("expected send, none arrived")
-	}
-	var got map[string]string
-	err := json.Unmarshal(sendBody.Bytes(), &got)
+	_, err := tr.pollOnce(context.Background(), nullLogger(), disp, 0, lockFor)
 	if err != nil {
-		t.Fatalf("send body not json: %q", sendBody.String())
+		t.Fatalf("pollOnce: %v", err)
 	}
-	if got["message"] != "[bot] hello" {
-		t.Errorf("message = %q, want prefix applied", got["message"])
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		b, _ := os.ReadFile(osaLog)
+		if strings.Contains(string(b), "[bot] hello") {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	b, _ := os.ReadFile(osaLog)
+	t.Fatalf("prefix not applied. osascript log: %s", b)
+}
+
+func TestRunSeedsCursorOnFirstStart(t *testing.T) {
+	// sqlite3 stub: branch on the query. When asked for MAX(ROWID), emit
+	// [{"max_rowid": 999}]. Any other query returns []. This proves Run
+	// seeds the cursor to the current max and never replays history on
+	// fresh installs.
+	script := `
+case "$*" in
+  *"MAX(ROWID)"*) cat <<'EOF'
+[{"max_rowid":999}]
+EOF
+  ;;
+  *) echo "[]" ;;
+esac
+`
+	sqlite := writeScript(t, script)
+	osa, _ := osascriptStubRecording(t)
+
+	disp := &fakeDispatcher{}
+	stateDir := t.TempDir()
+	tr := New("/ignored/chat.db", stateDir,
+		WithLogger(nullLogger()),
+		WithSQLiteBinary(sqlite),
+		WithOsascriptBinary(osa),
+		WithPollInterval(50*time.Millisecond),
+	)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	_ = tr.Run(ctx, disp)
+
+	persisted, err := loadCursor(filepath.Join(stateDir, "cursor"))
+	if err != nil {
+		t.Fatalf("load cursor: %v", err)
+	}
+	if persisted != 999 {
+		t.Errorf("expected cursor seeded to 999, got %d", persisted)
+	}
+	// No dispatch should have happened: MAX seeds the cursor, subsequent
+	// polls return empty, and Run exits on context timeout.
+	disp.mu.Lock()
+	defer disp.mu.Unlock()
+	if len(disp.calls) != 0 {
+		t.Errorf("fresh-install Run should not replay history: got %d calls", len(disp.calls))
 	}
 }

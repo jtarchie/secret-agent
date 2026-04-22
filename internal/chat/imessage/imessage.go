@@ -1,11 +1,18 @@
-// Package imessage is a chat.Transport backed by the BlueBubbles Server
-// (https://bluebubbles.app). The server runs as a macOS app that bridges
-// iMessage; we receive new messages via its webhook mechanism and send
-// replies via its REST API.
+// Package imessage is a chat.Transport for macOS iMessage. Reception is
+// driven by polling the Messages.app SQLite database at
+// ~/Library/Messages/chat.db via the `sqlite3` CLI; sending is done by
+// driving Messages.app with `osascript`. Both shell-outs match how the
+// notes-bot already integrates with macOS.
 //
-// The user is expected to register our webhook URL in the BlueBubbles
-// Server UI once; we do not auto-register to avoid creating duplicate
-// webhook entries on every startup.
+// The host must grant the secret-agent process two TCC permissions:
+//   - Full Disk Access (to read chat.db)
+//   - Automation → Messages (to let osascript send messages on your behalf)
+//
+// Known limitation: on recent macOS releases, message.text in chat.db is
+// often NULL and the real payload lives in message.attributedBody as a
+// typedstream blob. This transport reads message.text only; messages
+// authored with rich content may appear blank and get dropped until
+// attributedBody decoding is added.
 //
 // Routing (trigger matching, scope filters, prior-message buffering, and
 // per-bot attachment policy) lives in the dispatcher (see internal/router).
@@ -13,14 +20,9 @@ package imessage
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
-	"net"
-	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -31,61 +33,50 @@ import (
 	"github.com/jtarchie/secret-agent/internal/chat"
 )
 
-// Transport is a chat.Transport backed by a BlueBubbles Server.
+// Transport is a chat.Transport that polls chat.db and sends via osascript.
 type Transport struct {
-	serverURL     string
-	password      string
+	databasePath  string
 	stateDir      string
-	webhookListen string
-	webhookPath   string
+	pollInterval  time.Duration
+	sqliteBinary  string
+	osascriptBin  string
 	messagePrefix string
 	logger        *slog.Logger
-	httpClient    *http.Client
 }
 
 type Option func(*Transport)
 
-// WithLogger sets a slog.Logger for webhook and REST events.
+// WithLogger sets a slog.Logger for poll and send events.
 func WithLogger(l *slog.Logger) Option { return func(t *Transport) { t.logger = l } }
 
-// WithHTTPClient overrides the HTTP client used for REST calls. Useful in
-// tests that point it at an httptest.Server.
-func WithHTTPClient(c *http.Client) Option {
-	return func(t *Transport) { t.httpClient = c }
+// WithPollInterval sets the chat.db poll cadence. Lower values reduce
+// reply latency; higher values reduce CPU wake-ups. Defaults to 2s.
+func WithPollInterval(d time.Duration) Option {
+	return func(t *Transport) { t.pollInterval = d }
 }
 
-// WithWebhookListen sets the host:port to bind the webhook HTTP listener on.
-// Defaults to "127.0.0.1:4321". The BlueBubbles Server must be configured
-// to POST events to `http://<this addr>/<webhook_path>` for any delivery to
-// reach us.
-func WithWebhookListen(addr string) Option {
-	return func(t *Transport) { t.webhookListen = addr }
-}
+// WithSQLiteBinary overrides the sqlite3 binary path. Mainly for tests.
+func WithSQLiteBinary(p string) Option { return func(t *Transport) { t.sqliteBinary = p } }
 
-// WithWebhookPath sets the URL path the webhook handler is mounted at.
-// Defaults to "/imessage-webhook".
-func WithWebhookPath(p string) Option {
-	return func(t *Transport) { t.webhookPath = p }
-}
+// WithOsascriptBinary overrides the osascript binary path. Mainly for tests.
+func WithOsascriptBinary(p string) Option { return func(t *Transport) { t.osascriptBin = p } }
 
 // WithMessagePrefix prepends a literal string to every outgoing body
-// (including "error: ..." replies), matching the Signal/Slack options. On
-// iMessage, bot replies otherwise look identical to a human's.
+// (including "error: ..." replies). Matches the Signal/Slack options.
 func WithMessagePrefix(p string) Option {
 	return func(t *Transport) { t.messagePrefix = p }
 }
 
-// New constructs an iMessage transport. serverURL is the BlueBubbles Server
-// base URL (e.g. "http://localhost:1234"); password is the server password;
-// stateDir is where downloaded attachments are written.
-func New(serverURL, password, stateDir string, opts ...Option) *Transport {
+// New constructs an iMessage transport. databasePath is the chat.db path
+// (typically ~/Library/Messages/chat.db); stateDir is where the ROWID
+// cursor is persisted across restarts so we don't re-deliver history.
+func New(databasePath, stateDir string, opts ...Option) *Transport {
 	t := &Transport{
-		serverURL:     serverURL,
-		password:      password,
-		stateDir:      stateDir,
-		webhookListen: "127.0.0.1:4321",
-		webhookPath:   "/imessage-webhook",
-		httpClient:    &http.Client{Timeout: 60 * time.Second},
+		databasePath: databasePath,
+		stateDir:     stateDir,
+		pollInterval: 2 * time.Second,
+		sqliteBinary: "sqlite3",
+		osascriptBin: "osascript",
 	}
 	for _, opt := range opts {
 		opt(t)
@@ -96,25 +87,44 @@ func New(serverURL, password, stateDir string, opts ...Option) *Transport {
 	return t
 }
 
-// Run starts the webhook listener and blocks until ctx is canceled or the
-// listener fails.
+// Run polls chat.db on t.pollInterval and dispatches each new message.
+// Returns when ctx is canceled or an unrecoverable error occurs.
 func (t *Transport) Run(ctx context.Context, dispatcher chat.Dispatcher) error {
-	if t.serverURL == "" {
-		return errors.New("imessage transport: server URL is required")
-	}
-	if t.password == "" {
-		return errors.New("imessage transport: password is required")
+	if t.databasePath == "" {
+		return errors.New("imessage transport: database path is required")
 	}
 	if t.stateDir == "" {
 		return errors.New("imessage transport: state dir is required")
 	}
 
-	log := t.logger.With("component", "imessage", "server", t.serverURL, "listen", t.webhookListen, "path", t.webhookPath)
+	log := t.logger.With("component", "imessage", "database", t.databasePath)
 
-	cli := newClient(t.serverURL, t.password, t.httpClient)
+	err := os.MkdirAll(t.stateDir, 0o700)
+	if err != nil {
+		return fmt.Errorf("imessage state dir: %w", err)
+	}
+	cursorPath := filepath.Join(t.stateDir, "cursor")
 
-	// Per-conversation send serialization: multi-chunk replies stay ordered
-	// within one chat and don't interleave with parallel chats.
+	cursor, err := loadCursor(cursorPath)
+	if err != nil {
+		return fmt.Errorf("imessage cursor: %w", err)
+	}
+	// On first start (no cursor persisted), skip existing history by
+	// seeding the cursor to the current MAX(ROWID). Otherwise the first
+	// poll would replay every message in the database.
+	if cursor == 0 {
+		max, err := fetchMaxROWID(ctx, t.sqliteBinary, t.databasePath)
+		if err != nil {
+			return fmt.Errorf("imessage initial max rowid: %w", err)
+		}
+		cursor = max
+		err = saveCursor(cursorPath, cursor)
+		if err != nil {
+			return fmt.Errorf("imessage save cursor: %w", err)
+		}
+		log.Info("seeded cursor to current max rowid", "cursor", cursor)
+	}
+
 	var convMuM sync.Mutex
 	convMu := map[string]*sync.Mutex{}
 	lockFor := func(convID string) *sync.Mutex {
@@ -128,120 +138,101 @@ func (t *Transport) Run(ctx context.Context, dispatcher chat.Dispatcher) error {
 		return mu
 	}
 
-	mux := http.NewServeMux()
-	mux.HandleFunc(t.webhookPath, func(w http.ResponseWriter, r *http.Request) {
-		t.handleWebhook(ctx, log, cli, dispatcher, lockFor, w, r)
-	})
+	log.Info("polling chat.db", "interval", t.pollInterval, "cursor", cursor)
 
-	srv := &http.Server{
-		Addr:              t.webhookListen,
-		Handler:           mux,
-		ReadHeaderTimeout: 10 * time.Second,
-	}
+	ticker := time.NewTicker(t.pollInterval)
+	defer ticker.Stop()
 
-	ln, err := net.Listen("tcp", t.webhookListen)
-	if err != nil {
-		return fmt.Errorf("imessage listen %s: %w", t.webhookListen, err)
-	}
-
-	log.Info("listening for BlueBubbles webhooks", "addr", ln.Addr().String())
-
-	errCh := make(chan error, 1)
-	go func() {
-		err := srv.Serve(ln)
-		if err != nil && !errors.Is(err, http.ErrServerClosed) {
-			errCh <- err
-			return
+	for {
+		select {
+		case <-ctx.Done():
+			log.Info("shutdown", "reason", "context canceled", "err", ctx.Err())
+			return fmt.Errorf("imessage transport: %w", ctx.Err())
+		case <-ticker.C:
+			newCursor, err := t.pollOnce(ctx, log, dispatcher, cursor, lockFor)
+			if err != nil {
+				// Don't die on transient DB errors (e.g. the file was briefly
+				// locked by Messages.app during a write). Log and retry on
+				// the next tick.
+				log.Warn("poll failed, will retry", "err", err)
+				continue
+			}
+			if newCursor != cursor {
+				cursor = newCursor
+				err := saveCursor(cursorPath, cursor)
+				if err != nil {
+					log.Warn("cursor persist failed", "err", err, "cursor", cursor)
+				}
+			}
 		}
-		errCh <- nil
-	}()
-
-	select {
-	case <-ctx.Done():
-		// ctx is already canceled in this branch; WithoutCancel keeps the
-		// parent's values while giving Shutdown real time to drain.
-		shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
-		defer cancel()
-		_ = srv.Shutdown(shutdownCtx)
-		log.Info("shutdown", "reason", "context canceled", "err", ctx.Err())
-		return fmt.Errorf("imessage transport: %w", ctx.Err())
-	case err := <-errCh:
-		if err != nil {
-			return fmt.Errorf("imessage webhook server: %w", err)
-		}
-		return nil
 	}
 }
 
-// handleWebhook parses one BlueBubbles webhook POST and dispatches it.
-// Always responds 200 quickly so BlueBubbles doesn't retry.
-func (t *Transport) handleWebhook(
+// pollOnce fetches all rows past `cursor`, dispatches the ones that pass
+// the filter, and returns the new cursor (max ROWID seen, or the old
+// cursor if no rows came back).
+func (t *Transport) pollOnce(
 	ctx context.Context,
 	log *slog.Logger,
-	cli *client,
+	dispatcher chat.Dispatcher,
+	cursor int64,
+	lockFor func(string) *sync.Mutex,
+) (int64, error) {
+	rows, err := fetchNewMessages(ctx, t.sqliteBinary, t.databasePath, cursor)
+	if err != nil {
+		return cursor, err
+	}
+	for _, r := range rows {
+		if r.ROWID > cursor {
+			cursor = r.ROWID
+		}
+		t.handleRow(ctx, log, dispatcher, lockFor, r)
+	}
+	return cursor, nil
+}
+
+// handleRow filters one chat.db row and, if it's a real inbound user
+// message, dispatches it and sends the reply.
+func (t *Transport) handleRow(
+	ctx context.Context,
+	log *slog.Logger,
 	dispatcher chat.Dispatcher,
 	lockFor func(string) *sync.Mutex,
-	w http.ResponseWriter,
-	r *http.Request,
+	r row,
 ) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	if r.IsFromMe == 1 {
+		log.Debug("skip own message", "rowid", r.ROWID)
 		return
 	}
-	defer func() { _ = r.Body.Close() }()
-
-	var ev webhookEvent
-	err := json.NewDecoder(r.Body).Decode(&ev)
-	if err != nil {
-		log.Warn("decode webhook failed", "err", err)
-		http.Error(w, "bad json", http.StatusBadRequest)
+	if r.ChatGUID == "" {
+		log.Debug("skip message with no chat", "rowid", r.ROWID)
 		return
 	}
-
-	// Ack fast; the real work happens in a goroutine so we don't block
-	// BlueBubbles' delivery thread.
-	w.WriteHeader(http.StatusOK)
-
-	if ev.Type != "new-message" {
-		log.Debug("ignoring non-new-message event", "type", ev.Type)
-		return
-	}
-	if ev.Data.IsFromMe {
-		log.Debug("ignoring own-echo message", "guid", ev.Data.GUID)
+	text := strings.TrimSpace(r.Text)
+	if text == "" {
+		log.Debug("skip empty message (text may live in attributedBody)",
+			"rowid", r.ROWID, "msg_guid", r.MsgGUID,
+		)
 		return
 	}
 
-	text := strings.TrimSpace(ev.Data.Text)
-	chat0 := ev.Data.primaryChat()
-	if chat0.GUID == "" {
-		log.Warn("dropping message with no chat guid", "msg_guid", ev.Data.GUID)
-		return
-	}
-
-	atts := t.downloadAttachments(ctx, log, cli, ev.Data.GUID, ev.Data.Attachments)
-	if text == "" && len(atts) == 0 {
-		log.Debug("ignoring empty message", "chat", chat0.GUID)
-		return
-	}
-
-	env := buildEnvelope(ev.Data)
+	env := buildEnvelope(r)
 	log.Info("received message",
+		"rowid", r.ROWID,
 		"conv", env.ConvID,
 		"kind", env.Kind,
 		"sender", env.SenderID,
 		"bytes", len(text),
-		"attachments", len(atts),
 	)
 
-	go t.handleMessage(ctx, log, cli, dispatcher, lockFor(env.ConvID), env, chat.Message{Text: text, Attachments: atts})
+	go t.handleMessage(ctx, log, dispatcher, lockFor(env.ConvID), env, chat.Message{Text: text})
 }
 
-// handleMessage drains one dispatcher reply stream and sends the resulting
-// body back via the REST API, prefixed with MessagePrefix when set.
+// handleMessage drains the dispatcher reply stream and hands the result to
+// osascript for delivery.
 func (t *Transport) handleMessage(
 	ctx context.Context,
 	log *slog.Logger,
-	cli *client,
 	dispatcher chat.Dispatcher,
 	convLock *sync.Mutex,
 	env chat.Envelope,
@@ -253,7 +244,6 @@ func (t *Transport) handleMessage(
 	var reply strings.Builder
 	var replyErr error
 	chunkCount := 0
-
 	for chunk := range dispatcher.Dispatch(ctx, env, userMsg) {
 		if chunk.Err != nil {
 			replyErr = chunk.Err
@@ -284,7 +274,7 @@ func (t *Transport) handleMessage(
 	defer convLock.Unlock()
 
 	sendStart := time.Now()
-	err := cli.sendText(ctx, env.ConvID, newTempGUID(), body)
+	err := t.send(ctx, env, body)
 	if err != nil {
 		peerLog.Error("send failed", "err", err, "duration", time.Since(sendStart))
 		return
@@ -292,77 +282,67 @@ func (t *Transport) handleMessage(
 	peerLog.Info("send ok", "bytes", len(body), "duration", time.Since(sendStart))
 }
 
-// downloadAttachments saves each attachment under stateDir/<msgGUID>/<attGUID>-<name>
-// and returns chat.Attachment entries for those that succeeded. Failures are
-// logged and skipped.
-func (t *Transport) downloadAttachments(ctx context.Context, log *slog.Logger, cli *client, msgGUID string, in []attachment) []chat.Attachment {
-	if len(in) == 0 {
-		return nil
+// send dispatches to the right AppleScript send form based on env.Kind.
+// DMs address the buddy directly (works for either phone or email senders);
+// groups address the chat by GUID so replies land in the right thread.
+func (t *Transport) send(ctx context.Context, env chat.Envelope, body string) error {
+	if env.Kind == "group" {
+		return sendGroup(ctx, t.osascriptBin, env.GroupID, body)
 	}
-	out := make([]chat.Attachment, 0, len(in))
-	for _, a := range in {
-		if a.GUID == "" {
-			continue
-		}
-		dest := filepath.Join(t.stateDir, "attachments", msgGUID, a.GUID+"-"+safeFilename(a.TransferName))
-		err := cli.downloadAttachment(ctx, a.GUID, dest)
-		if err != nil {
-			log.Warn("attachment download failed", "guid", a.GUID, "err", err)
-			continue
-		}
-		out = append(out, chat.Attachment{
-			Path:        dest,
-			Filename:    a.TransferName,
-			ContentType: a.MIMEType,
-		})
+	if env.SenderID == "" {
+		return errors.New("no sender id for dm reply")
 	}
-	return out
+	return sendDM(ctx, t.osascriptBin, env.SenderID, body)
 }
 
-// buildEnvelope translates a BlueBubbles new-message event into the
-// chat.Envelope the dispatcher expects.
-func buildEnvelope(d newMessageData) chat.Envelope {
-	chat0 := d.primaryChat()
-	sender := d.senderAddress()
-
+// buildEnvelope translates one chat.db row into the chat.Envelope the
+// dispatcher expects.
+func buildEnvelope(r row) chat.Envelope {
 	env := chat.Envelope{
-		ConvID:    chat0.GUID,
+		ConvID:    r.ChatGUID,
 		Transport: "imessage",
-		SenderID:  sender,
+		SenderID:  r.SenderAddress,
 	}
-	if e164Re.MatchString(sender) {
-		env.SenderPhone = sender
+	if e164Re.MatchString(r.SenderAddress) {
+		env.SenderPhone = r.SenderAddress
 	}
-	if d.isGroup() {
+	if styleIsGroup(r.ChatStyle) || r.ParticipantCount > 1 {
 		env.Kind = "group"
-		env.GroupID = chat0.GUID
+		env.GroupID = r.ChatGUID
 	} else {
 		env.Kind = "dm"
 	}
 	return env
 }
 
-// newTempGUID is the client-supplied ID BlueBubbles uses to correlate send
-// requests with eventual delivery events. It only needs to be unique per
-// send; a random hex string is plenty.
-func newTempGUID() string {
-	var b [16]byte
-	_, _ = rand.Read(b[:])
-	return "secret-agent-" + hex.EncodeToString(b[:])
-}
-
-// safeFilename strips path separators so a hostile filename can't escape
-// the per-message attachment dir.
-func safeFilename(name string) string {
-	if name == "" {
-		return "file"
-	}
-	name = filepath.Base(name)
-	name = strings.ReplaceAll(name, string(filepath.Separator), "_")
-	if name == "." || name == ".." {
-		return "file"
-	}
-	return name
-}
-
 var e164Re = regexp.MustCompile(`^\+[1-9]\d{6,14}$`)
+
+// loadCursor reads the persisted max-ROWID from disk. Missing file → 0,
+// which the caller treats as "seed from current MAX(ROWID)".
+func loadCursor(path string) (int64, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return 0, nil
+		}
+		return 0, fmt.Errorf("read cursor: %w", err)
+	}
+	s := strings.TrimSpace(string(b))
+	if s == "" {
+		return 0, nil
+	}
+	var n int64
+	_, err = fmt.Sscanf(s, "%d", &n)
+	if err != nil {
+		return 0, fmt.Errorf("parse cursor %q: %w", s, err)
+	}
+	return n, nil
+}
+
+func saveCursor(path string, n int64) error {
+	err := os.WriteFile(path, []byte(fmt.Sprintf("%d\n", n)), 0o600)
+	if err != nil {
+		return fmt.Errorf("write cursor: %w", err)
+	}
+	return nil
+}

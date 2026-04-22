@@ -164,22 +164,23 @@ by index (`"0"`) or filename.
 
 ## Getting Started — iMessage (macOS)
 
-iMessage support is provided by bridging through [BlueBubbles Server](https://bluebubbles.app),
-an open-source macOS app that exposes iMessage over a REST + webhook API.
-secret-agent receives new messages via an HTTP webhook and sends replies
-via the BlueBubbles REST endpoint.
+iMessage support is macOS-native: secret-agent polls
+`~/Library/Messages/chat.db` with the `sqlite3` CLI for new inbound
+messages and drives Messages.app through `osascript` to send replies.
+No external server or bridge is required.
 
-### 1. Install and configure BlueBubbles Server
+### 1. Grant permissions
 
-1. Install the server app from https://bluebubbles.app and grant it the
-   permissions it asks for (Full Disk Access, Accessibility, Automation
-   for Messages). It needs them to read and write iMessage state.
-2. Set a server password in the app's settings — this is your
-   `BLUEBUBBLES_PASSWORD`.
-3. In the app's **Webhooks** tab, register
-   `http://127.0.0.1:4321/imessage-webhook` for the `new-message` event.
-   (This URL must match `webhook_listen` + `webhook_path` in your
-   secret-agent config.)
+The process running secret-agent needs two TCC permissions. Grant them in
+**System Settings → Privacy & Security**:
+
+- **Full Disk Access** — required to read `~/Library/Messages/chat.db`.
+  Add the terminal (or whichever app launches `secret-agent`).
+- **Automation → Messages** — required so `osascript` can send on your
+  behalf. macOS prompts the first time you send; approve it there.
+
+The first poll after install seeds an internal cursor to the current
+maximum message ROWID, so existing history is never replayed.
 
 ### 2. Scope the bot
 
@@ -196,22 +197,24 @@ bots:
   - examples/hello-world.yml
 transports:
   - type: imessage
-    server_url: http://localhost:1234
-    password_env: BLUEBUBBLES_PASSWORD
     state_dir: ./imessage-state
-    webhook_listen: 127.0.0.1:4321
-    webhook_path: /imessage-webhook
+    # database_path defaults to ~/Library/Messages/chat.db
+    # poll_interval defaults to 2s
+    poll_interval: 2s
     message_prefix: "🤖 "
 ```
 
 ```sh
-BLUEBUBBLES_PASSWORD=… \
-  ./secret-agent run --config config.yml --model … --api-key …
+./secret-agent run --config config.yml --model … --api-key …
 ```
 
-Inbound attachments are downloaded under `state_dir/attachments/<msg-guid>/`
-and surfaced to the bot via the same `chat.Attachment` contract used by
-Signal and Slack.
+Inbound latency is bounded by `poll_interval`; 1–2 seconds is typical.
+
+**Known limitation.** On recent macOS releases, `message.text` in chat.db
+is often NULL and the real payload lives in `message.attributedBody` as a
+typedstream blob. This transport reads `message.text` only, so messages
+with rich content may appear blank and get dropped until attributedBody
+decoding is added. Simple plain-text messages work normally.
 
 ## Bot definition (YAML)
 

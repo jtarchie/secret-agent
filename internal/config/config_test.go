@@ -276,15 +276,12 @@ transports:
 	}
 }
 
-func TestLoadIMessageResolvesPasswordEnv(t *testing.T) {
-	t.Setenv("TEST_BB_PASSWORD", "hunter2")
+func TestLoadIMessageDefaultsDatabasePath(t *testing.T) {
 	p := write(t, `
 bots: [b.yml]
 transports:
   - type: imessage
-    server_url: http://localhost:1234
-    password_env: TEST_BB_PASSWORD
-    state_dir: /tmp/bb
+    state_dir: /tmp/imsg
 `)
 	cfg, err := Load(p)
 	if err != nil {
@@ -294,59 +291,41 @@ transports:
 	if tr.Type != TransportIMessage {
 		t.Errorf("type: got %q, want imessage", tr.Type)
 	}
-	if tr.ServerURL != "http://localhost:1234" || tr.StateDir != "/tmp/bb" {
-		t.Errorf("fields not parsed: %+v", tr)
+	if tr.StateDir != "/tmp/imsg" {
+		t.Errorf("state_dir: %q", tr.StateDir)
 	}
-	if tr.Password != "hunter2" {
-		t.Errorf("password not resolved: %+v", tr)
+	if !strings.HasSuffix(tr.DatabasePath, "/Library/Messages/chat.db") {
+		t.Errorf("database_path should default under home: got %q", tr.DatabasePath)
 	}
 }
 
-func TestLoadIMessageRejectsEmptyPasswordEnv(t *testing.T) {
-	t.Setenv("NEVER_SET_BB", "")
+func TestLoadIMessageKeepsExplicitDatabasePath(t *testing.T) {
 	p := write(t, `
 bots: [b.yml]
 transports:
   - type: imessage
-    server_url: http://localhost:1234
-    password_env: NEVER_SET_BB
-    state_dir: /tmp/bb
+    state_dir: /tmp/imsg
+    database_path: /alt/chat.db
+    poll_interval: 500ms
 `)
-	_, err := Load(p)
-	if err == nil {
-		t.Fatal("expected empty-env error")
+	cfg, err := Load(p)
+	if err != nil {
+		t.Fatalf("load: %v", err)
 	}
-	if !strings.Contains(err.Error(), "NEVER_SET_BB") {
-		t.Errorf("error should name the missing env var: %v", err)
+	tr := cfg.Transports[0]
+	if tr.DatabasePath != "/alt/chat.db" {
+		t.Errorf("database_path: %q", tr.DatabasePath)
 	}
-}
-
-func TestLoadIMessageRejectsMissingServerURL(t *testing.T) {
-	t.Setenv("BB", "pw")
-	p := write(t, `
-bots: [b.yml]
-transports:
-  - type: imessage
-    password_env: BB
-    state_dir: /tmp/bb
-`)
-	_, err := Load(p)
-	if err == nil {
-		t.Fatal("expected missing server_url error")
-	}
-	if !strings.Contains(err.Error(), "server_url") {
-		t.Errorf("error should mention server_url: %v", err)
+	if tr.PollInterval != "500ms" {
+		t.Errorf("poll_interval: %q", tr.PollInterval)
 	}
 }
 
 func TestLoadIMessageRejectsMissingStateDir(t *testing.T) {
-	t.Setenv("BB", "pw")
 	p := write(t, `
 bots: [b.yml]
 transports:
   - type: imessage
-    server_url: http://localhost:1234
-    password_env: BB
 `)
 	_, err := Load(p)
 	if err == nil {
@@ -354,6 +333,23 @@ transports:
 	}
 	if !strings.Contains(err.Error(), "state_dir") {
 		t.Errorf("error should mention state_dir: %v", err)
+	}
+}
+
+func TestLoadIMessageRejectsBadPollInterval(t *testing.T) {
+	p := write(t, `
+bots: [b.yml]
+transports:
+  - type: imessage
+    state_dir: /tmp/imsg
+    poll_interval: not-a-duration
+`)
+	_, err := Load(p)
+	if err == nil {
+		t.Fatal("expected poll_interval parse error")
+	}
+	if !strings.Contains(err.Error(), "poll_interval") {
+		t.Errorf("error should mention poll_interval: %v", err)
 	}
 }
 

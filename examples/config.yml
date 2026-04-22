@@ -10,12 +10,11 @@ transports:
     bot_token_env: SLACK_BOT_TOKEN
     app_token_env: SLACK_APP_TOKEN
 
-  # iMessage via a BlueBubbles Server (https://bluebubbles.app) running on
-  # the same Mac. Register `http://127.0.0.1:4321/imessage-webhook` in the
-  # BlueBubbles UI for the `new-message` event before starting secret-agent.
+  # iMessage on macOS. Receive by polling ~/Library/Messages/chat.db with
+  # the sqlite3 CLI; send by driving Messages.app via osascript. Requires
+  # Full Disk Access + Automation → Messages on the secret-agent process.
   - type: imessage
-    server_url: http://localhost:1234
-    password_env: BLUEBUBBLES_PASSWORD
     state_dir: ./imessage-state
-    webhook_listen: 127.0.0.1:4321
-    webhook_path: /imessage-webhook
+    # database_path defaults to ~/Library/Messages/chat.db
+    # poll_interval defaults to 2s
+    poll_interval: 2s
