@@ -5,21 +5,21 @@
 class SecretAgent < Formula
   desc "YAML-defined chat bot with pluggable transports (CLI, Signal, Slack)"
   homepage "https://github.com/jtarchie/secret-agent"
-  version "0.1.2"
+  version "0.1.3"
   license "MIT"
 
   on_macos do
     if Hardware::CPU.intel?
-      url "https://github.com/jtarchie/secret-agent/releases/download/v0.1.2/secret-agent_0.1.2_darwin_amd64.tar.gz"
-      sha256 "284f2f4c3ec0dcd47365f728b9b643aaf3e6ee4dfba4c72756fcda4bb749af37"
+      url "https://github.com/jtarchie/secret-agent/releases/download/v0.1.3/secret-agent_0.1.3_darwin_amd64.tar.gz"
+      sha256 "071aeb1fff94295ca41b88b91fe3cca2d6242b96be4f81833b44172acb8a0fa4"
 
       define_method(:install) do
         bin.install "secret-agent"
       end
     end
     if Hardware::CPU.arm?
-      url "https://github.com/jtarchie/secret-agent/releases/download/v0.1.2/secret-agent_0.1.2_darwin_arm64.tar.gz"
-      sha256 "e4baf1c8c2a76329025ce31fefd0af1cad426a3fe154548979e9b4645f63c917"
+      url "https://github.com/jtarchie/secret-agent/releases/download/v0.1.3/secret-agent_0.1.3_darwin_arm64.tar.gz"
+      sha256 "9a1d975580b37a2f5aa1f4ee8ff0db585608df5e222ebb95538b327f7387af51"
 
       define_method(:install) do
         bin.install "secret-agent"
@@ -29,15 +29,15 @@ class SecretAgent < Formula
 
   on_linux do
     if Hardware::CPU.intel? && Hardware::CPU.is_64_bit?
-      url "https://github.com/jtarchie/secret-agent/releases/download/v0.1.2/secret-agent_0.1.2_linux_amd64.tar.gz"
-      sha256 "7f4ea5be70b0c2cfbd88fc3720571a55095b7de046b6bd11f82959bd641cadd7"
+      url "https://github.com/jtarchie/secret-agent/releases/download/v0.1.3/secret-agent_0.1.3_linux_amd64.tar.gz"
+      sha256 "329c31effecb75670c4c68a15a7c401dbb337b0cf21c15c7022f86ae67e470d2"
       define_method(:install) do
         bin.install "secret-agent"
       end
     end
     if Hardware::CPU.arm? && Hardware::CPU.is_64_bit?
-      url "https://github.com/jtarchie/secret-agent/releases/download/v0.1.2/secret-agent_0.1.2_linux_arm64.tar.gz"
-      sha256 "02a997adbd95d92b5d48c0b0d58aefea66e5106b0320dfa40f9b02213fe32482"
+      url "https://github.com/jtarchie/secret-agent/releases/download/v0.1.3/secret-agent_0.1.3_linux_arm64.tar.gz"
+      sha256 "52e6c89a6c1bc33d62fc0aeab0601490dba94edc6304923f956c45312589298f"
       define_method(:install) do
         bin.install "secret-agent"
       end
