@@ -141,12 +141,22 @@ func (t *Transport) Run(ctx context.Context, dispatcher chat.Dispatcher) error {
 		return mu
 	}
 
-	// Event pump: runs until Events is closed by RunContext returning.
+	// Event pump: runs until ctx is canceled. slack-go never closes
+	// sm.Events, so we must also watch ctx.Done() — ranging over the
+	// channel alone would hang on shutdown.
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		for evt := range sm.Events {
-			t.handleEvent(ctx, log, sm, api, dispatcher, lockFor, botID, evt)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case evt, ok := <-sm.Events:
+				if !ok {
+					return
+				}
+				t.handleEvent(ctx, log, sm, api, dispatcher, lockFor, botID, evt)
+			}
 		}
 	}()
 
