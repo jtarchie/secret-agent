@@ -2,8 +2,11 @@ package slack
 
 import (
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/jtarchie/secret-agent/internal/chat"
+	slackgo "github.com/slack-go/slack"
 	"github.com/slack-go/slack/slackevents"
 )
 
@@ -138,4 +141,72 @@ func slackGroupID(ev *slackevents.MessageEvent) string {
 		return ""
 	}
 	return ev.Channel
+}
+
+// channelTypeForID infers a Slack ChannelType from the channel ID prefix.
+// AppMentionEvent doesn't include channel_type, so we have to guess.
+// Slack ID prefixes: C=public channel, G=private channel, D=DM, M=mpim.
+func channelTypeForID(channel string) string {
+	switch {
+	case strings.HasPrefix(channel, "D"):
+		return slackevents.ChannelTypeIM
+	case strings.HasPrefix(channel, "G"):
+		return slackevents.ChannelTypeGroup
+	case strings.HasPrefix(channel, "M"):
+		return slackevents.ChannelTypeMPIM
+	default:
+		return slackevents.ChannelTypeChannel
+	}
+}
+
+// messageFromAppMention adapts an AppMentionEvent into the MessageEvent
+// shape so the rest of the pipeline (shouldDispatch, buildEnvelope,
+// handleMessage) can process it uniformly. AppMentionEvent fires even when
+// the bot isn't a channel member, so it's the only path for @-mentions in
+// channels the bot was never invited to.
+func messageFromAppMention(ev *slackevents.AppMentionEvent) *slackevents.MessageEvent {
+	msg := &slackevents.MessageEvent{
+		Type:            "message",
+		User:            ev.User,
+		Text:            ev.Text,
+		TimeStamp:       ev.TimeStamp,
+		ThreadTimeStamp: ev.ThreadTimeStamp,
+		Channel:         ev.Channel,
+		ChannelType:     channelTypeForID(ev.Channel),
+		BotID:           ev.BotID,
+	}
+	// hasFiles/filesFor read from ev.Message.Files; mirror the slack-go
+	// MessageEvent shape so file uploads still work for app_mentions.
+	msg.Message = &slackgo.Msg{Text: ev.Text, User: ev.User, Files: ev.Files}
+	return msg
+}
+
+// eventCache deduplicates events keyed by channel+timestamp. Slack
+// delivers both a MessageEvent and an AppMentionEvent for the same
+// physical @-mention when the bot is in a channel and subscribed to
+// message.channels — without dedup the bot would respond twice.
+type eventCache struct {
+	mu    sync.Mutex
+	items map[string]time.Time
+	ttl   time.Duration
+}
+
+func newEventCache(ttl time.Duration) *eventCache {
+	return &eventCache{items: map[string]time.Time{}, ttl: ttl}
+}
+
+// seen returns true if key was recorded within the TTL. It records the
+// key as a side effect, so the second call within the window returns true.
+func (c *eventCache) seen(key string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	now := time.Now()
+	for k, t := range c.items {
+		if now.Sub(t) > c.ttl {
+			delete(c.items, k)
+		}
+	}
+	_, ok := c.items[key]
+	c.items[key] = now
+	return ok
 }

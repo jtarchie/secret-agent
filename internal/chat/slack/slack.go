@@ -123,8 +123,6 @@ func (t *Transport) Run(ctx context.Context, dispatcher chat.Dispatcher) error {
 	log = log.With("bot_id", botID, "user_id", auth.UserID, "team", auth.Team)
 	log.Info("slack authenticated")
 
-	sm := socketmode.New(api)
-
 	// Per-channel send serialization so multi-chunk replies from one
 	// conversation stay ordered and stay under Slack's per-channel rate
 	// limit (~1/sec on chat.postMessage).
@@ -141,9 +139,71 @@ func (t *Transport) Run(ctx context.Context, dispatcher chat.Dispatcher) error {
 		return mu
 	}
 
-	// Event pump: runs until ctx is canceled. slack-go never closes
-	// sm.Events, so we must also watch ctx.Done() — ranging over the
-	// channel alone would hang on shutdown.
+	// Dedup across MessageEvent + AppMentionEvent for the same @-mention.
+	// Spans reconnects so a Slack-side replay after a blip doesn't double-fire.
+	seen := newEventCache(5 * time.Minute)
+
+	// Reconnect loop. slack-go's socket-mode client does some internal
+	// reconnects, but RunContext returns terminally on certain failures
+	// (TLS errors, server-initiated close, transient auth blips). Wrap it
+	// so the bot stays alive across hiccups instead of exiting silently.
+	const (
+		minBackoff   = time.Second
+		maxBackoff   = 30 * time.Second
+		resetWindow  = 60 * time.Second
+	)
+	backoff := minBackoff
+	for {
+		if ctx.Err() != nil {
+			return nil
+		}
+
+		start := time.Now()
+		runErr := t.runOnce(ctx, log, api, dispatcher, lockFor, seen, botID)
+		ranFor := time.Since(start)
+
+		if ctx.Err() != nil {
+			return nil
+		}
+
+		if ranFor > resetWindow {
+			backoff = minBackoff
+		}
+
+		log.Warn("slack socket mode: connection ended, reconnecting",
+			"err", runErr, "ran_for", ranFor, "backoff", backoff,
+		)
+
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-time.After(backoff):
+		}
+
+		backoff *= 2
+		if backoff > maxBackoff {
+			backoff = maxBackoff
+		}
+	}
+}
+
+// runOnce opens one Socket Mode connection and pumps events until the
+// connection ends or ctx is canceled. Returns the run error (or nil on
+// clean shutdown) so the caller can decide whether to reconnect.
+func (t *Transport) runOnce(
+	ctx context.Context,
+	log *slog.Logger,
+	api *slackgo.Client,
+	dispatcher chat.Dispatcher,
+	lockFor func(string) *sync.Mutex,
+	seen *eventCache,
+	botID string,
+) error {
+	sm := socketmode.New(api)
+
+	// Event pump: runs until ctx is canceled or sm.Events closes.
+	// slack-go never closes sm.Events itself, so we must also watch
+	// ctx.Done() — ranging over the channel alone would hang on shutdown.
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -155,7 +215,7 @@ func (t *Transport) Run(ctx context.Context, dispatcher chat.Dispatcher) error {
 				if !ok {
 					return
 				}
-				t.handleEvent(ctx, log, sm, api, dispatcher, lockFor, botID, evt)
+				t.handleEvent(ctx, log, sm, api, dispatcher, lockFor, seen, botID, evt)
 			}
 		}
 	}()
@@ -165,7 +225,7 @@ func (t *Transport) Run(ctx context.Context, dispatcher chat.Dispatcher) error {
 	<-done
 
 	if runErr != nil && !errors.Is(runErr, context.Canceled) {
-		return fmt.Errorf("slack socket mode: %w", runErr)
+		return fmt.Errorf("socket mode run: %w", runErr)
 	}
 	return nil
 }
@@ -204,6 +264,7 @@ func (t *Transport) handleEvent(
 	api *slackgo.Client,
 	dispatcher chat.Dispatcher,
 	lockFor func(string) *sync.Mutex,
+	seen *eventCache,
 	botID string,
 	evt socketmode.Event,
 ) {
@@ -217,35 +278,65 @@ func (t *Transport) handleEvent(
 	case socketmode.EventTypeHello:
 		log.Debug("slack socket mode: hello")
 	case socketmode.EventTypeEventsAPI:
-		apiEvt, ok := evt.Data.(slackevents.EventsAPIEvent)
-		if !ok {
-			log.Warn("events api: unexpected data shape")
-			return
-		}
-		// Always ack before we start the real work.
-		if evt.Request != nil {
-			err := sm.AckCtx(ctx, evt.Request.EnvelopeID, nil)
-			if err != nil {
-				log.Warn("ack failed", "err", err)
-			}
-		}
-		if apiEvt.Type != slackevents.CallbackEvent {
-			log.Debug("events api: non-callback event", "type", apiEvt.Type)
-			return
-		}
-		msg, ok := apiEvt.InnerEvent.Data.(*slackevents.MessageEvent)
-		if !ok {
-			log.Debug("events api: non-message inner event", "type", apiEvt.InnerEvent.Type)
-			return
-		}
-		if ok, reason := shouldDispatch(msg, botID); !ok {
-			log.Debug("message dropped", "reason", reason, "user", msg.User, "channel", msg.Channel)
-			return
-		}
-		go t.handleMessage(ctx, log, api, dispatcher, lockFor, msg)
+		t.handleEventsAPI(ctx, log, sm, api, dispatcher, lockFor, seen, botID, evt)
 	default:
 		log.Debug("slack socket mode: ignoring event", "type", evt.Type)
 	}
+}
+
+// handleEventsAPI processes a CallbackEvent off the socket-mode stream:
+// acks immediately, normalizes MessageEvent/AppMentionEvent to a single
+// MessageEvent shape, dedups, filters, and dispatches asynchronously.
+func (t *Transport) handleEventsAPI(
+	ctx context.Context,
+	log *slog.Logger,
+	sm *socketmode.Client,
+	api *slackgo.Client,
+	dispatcher chat.Dispatcher,
+	lockFor func(string) *sync.Mutex,
+	seen *eventCache,
+	botID string,
+	evt socketmode.Event,
+) {
+	apiEvt, ok := evt.Data.(slackevents.EventsAPIEvent)
+	if !ok {
+		log.Warn("events api: unexpected data shape")
+		return
+	}
+	// Always ack before we start the real work.
+	if evt.Request != nil {
+		err := sm.AckCtx(ctx, evt.Request.EnvelopeID, nil)
+		if err != nil {
+			log.Warn("ack failed", "err", err)
+		}
+	}
+	if apiEvt.Type != slackevents.CallbackEvent {
+		log.Debug("events api: non-callback event", "type", apiEvt.Type)
+		return
+	}
+	var msg *slackevents.MessageEvent
+	switch inner := apiEvt.InnerEvent.Data.(type) {
+	case *slackevents.MessageEvent:
+		msg = inner
+	case *slackevents.AppMentionEvent:
+		// AppMentionEvent fires for @-mentions even when the bot isn't
+		// a channel member. When the bot *is* a member with message.channels
+		// subscribed, both events fire for the same physical message —
+		// the seen cache below dedups them.
+		msg = messageFromAppMention(inner)
+	default:
+		log.Debug("events api: unhandled inner event type", "type", apiEvt.InnerEvent.Type)
+		return
+	}
+	if seen.seen(msg.Channel + ":" + msg.TimeStamp) {
+		log.Debug("message dropped", "reason", "duplicate", "channel", msg.Channel, "ts", msg.TimeStamp)
+		return
+	}
+	if ok, reason := shouldDispatch(msg, botID); !ok {
+		log.Debug("message dropped", "reason", reason, "user", msg.User, "channel", msg.Channel)
+		return
+	}
+	go t.handleMessage(ctx, log, api, dispatcher, lockFor, msg)
 }
 
 // handleMessage dispatches a single filtered MessageEvent. Attachments are

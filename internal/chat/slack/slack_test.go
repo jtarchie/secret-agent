@@ -2,6 +2,7 @@ package slack
 
 import (
 	"testing"
+	"time"
 
 	slackgo "github.com/slack-go/slack"
 	"github.com/slack-go/slack/slackevents"
@@ -159,4 +160,81 @@ func withSubtypeAndFile(ev *slackevents.MessageEvent, sub string) *slackevents.M
 	ev.SubType = sub
 	ev.Message.Files = []slackgo.File{{ID: "F1", Name: "photo.png", URLPrivateDownload: "https://slack/files/F1/download"}}
 	return ev
+}
+
+func TestChannelTypeForID(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+	}{
+		{"C123", slackevents.ChannelTypeChannel},
+		{"G123", slackevents.ChannelTypeGroup},
+		{"D123", slackevents.ChannelTypeIM},
+		{"M123", slackevents.ChannelTypeMPIM},
+		{"", slackevents.ChannelTypeChannel},
+		{"unknown", slackevents.ChannelTypeChannel},
+	}
+	for _, c := range cases {
+		if got := channelTypeForID(c.in); got != c.want {
+			t.Errorf("channelTypeForID(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+func TestMessageFromAppMentionPreservesFields(t *testing.T) {
+	mention := &slackevents.AppMentionEvent{
+		User:            "U1",
+		Text:            "<@UBOT> hello",
+		TimeStamp:       "111.222",
+		ThreadTimeStamp: "100.000",
+		Channel:         "C123",
+		BotID:           "",
+		Files:           []slackgo.File{{ID: "F1", Name: "n.png"}},
+	}
+	msg := messageFromAppMention(mention)
+	if msg.User != "U1" || msg.Text != "<@UBOT> hello" {
+		t.Errorf("user/text not preserved: %+v", msg)
+	}
+	if msg.TimeStamp != "111.222" || msg.ThreadTimeStamp != "100.000" {
+		t.Errorf("timestamps not preserved: %+v", msg)
+	}
+	if msg.Channel != "C123" || msg.ChannelType != slackevents.ChannelTypeChannel {
+		t.Errorf("channel/type wrong: %+v", msg)
+	}
+	if msg.Message == nil || len(msg.Message.Files) != 1 || msg.Message.Files[0].ID != "F1" {
+		t.Errorf("files not threaded onto Message: %+v", msg.Message)
+	}
+}
+
+func TestMessageFromAppMentionInfersDMChannelType(t *testing.T) {
+	mention := &slackevents.AppMentionEvent{User: "U1", Text: "hi", Channel: "D123"}
+	msg := messageFromAppMention(mention)
+	if msg.ChannelType != slackevents.ChannelTypeIM {
+		t.Errorf("expected IM channel type for D-prefix channel, got %q", msg.ChannelType)
+	}
+	if got := buildEnvelope(msg); got.Kind != "dm" || got.GroupID != "" {
+		t.Errorf("DM envelope wrong: %+v", got)
+	}
+}
+
+func TestEventCacheDedups(t *testing.T) {
+	c := newEventCache(time.Minute)
+	if c.seen("C1:111.222") {
+		t.Error("first call should not be marked seen")
+	}
+	if !c.seen("C1:111.222") {
+		t.Error("second call with same key should be marked seen")
+	}
+	if c.seen("C1:333.444") {
+		t.Error("different key should not be marked seen")
+	}
+}
+
+func TestEventCacheExpiresOldEntries(t *testing.T) {
+	c := newEventCache(time.Millisecond)
+	c.seen("C1:111.222")
+	time.Sleep(5 * time.Millisecond)
+	if c.seen("C1:111.222") {
+		t.Error("entry past TTL should not be marked seen")
+	}
 }
