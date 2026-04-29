@@ -11,16 +11,36 @@ func TestListBuiltins(t *testing.T) {
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
-	want := []string{"code-reviewer", "summarizer", "translator"}
+	want := map[string]bool{
+		"code-reviewer": true,
+		"pii":           true,
+		"summarizer":    true,
+		"translator":    true,
+	}
 	if len(items) != len(want) {
 		t.Fatalf("got %d builtins, want %d (%v)", len(items), len(want), items)
 	}
-	for i, name := range want {
-		if items[i].Name != name {
-			t.Errorf("items[%d].Name = %q, want %q", i, items[i].Name, name)
+	seen := make(map[string]bool, len(items))
+	var prev string
+	for i, it := range items {
+		if !want[it.Name] {
+			t.Errorf("items[%d].Name = %q is not an expected builtin", i, it.Name)
 		}
-		if items[i].Description == "" {
-			t.Errorf("items[%d] (%s) has empty description", i, items[i].Name)
+		if seen[it.Name] {
+			t.Errorf("duplicate builtin %q", it.Name)
+		}
+		seen[it.Name] = true
+		if it.Description == "" {
+			t.Errorf("builtin %q has empty description", it.Name)
+		}
+		if i > 0 && it.Name < prev {
+			t.Errorf("builtins not sorted: %q came after %q", it.Name, prev)
+		}
+		prev = it.Name
+	}
+	for name := range want {
+		if !seen[name] {
+			t.Errorf("expected builtin %q not present", name)
 		}
 	}
 }

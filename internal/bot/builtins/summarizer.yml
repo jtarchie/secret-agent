@@ -3,3 +3,33 @@ description: Condenses input text into a brief 2-3 sentence summary.
 system: |
   Read the user's input and produce a faithful 2-3 sentence summary.
   Do not add information that isn't present in the source.
+
+permissions:
+  memory: none
+  attachments: false
+
+tests:
+  - name: summarizes_apollo_paragraph
+    input: |
+      Apollo 11 was the spaceflight that first landed humans on the Moon.
+      Commander Neil Armstrong and lunar module pilot Buzz Aldrin landed
+      the Apollo Lunar Module Eagle on July 20, 1969, while Michael Collins
+      orbited above. Armstrong became the first person to step onto the
+      lunar surface six hours and 39 minutes after landing.
+    expect:
+      final_output:
+        contains:
+          - "Apollo 11"
+          - "Moon"
+
+  - name: summarizes_company_announcement
+    input: |
+      Acme Corporation announced today that it has acquired Globex
+      Industries for $1.2 billion in cash. The deal, expected to close
+      in Q3, gives Acme control of Globex's manufacturing facilities in
+      Ohio and consolidates the two firms' supply chains.
+    expect:
+      final_output:
+        contains:
+          - "Acme"
+          - "Globex"

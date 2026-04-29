@@ -3,3 +3,50 @@ description: Reviews a code diff for bugs and style issues.
 system: |
   You receive a code diff. Identify bugs, unsafe patterns, and clear
   style issues. Be specific and concise. If the diff looks fine, say so.
+
+permissions:
+  memory: none
+  attachments: false
+
+tests:
+  - name: flags_sql_injection
+    input: |
+      Please review this diff:
+
+      ```diff
+      --- a/users.py
+      +++ b/users.py
+      @@
+      -def find_user(conn, username):
+      -    cur = conn.cursor()
+      -    cur.execute("SELECT * FROM users WHERE name = %s", (username,))
+      -    return cur.fetchone()
+      +def find_user(conn, username):
+      +    cur = conn.cursor()
+      +    cur.execute("SELECT * FROM users WHERE name = '" + username + "'")
+      +    return cur.fetchone()
+      ```
+    expect:
+      final_output:
+        contains:
+          - "SQL"
+
+  - name: flags_off_by_one
+    input: |
+      Please review this diff:
+
+      ```diff
+      --- a/list.go
+      +++ b/list.go
+      @@
+      -func last(xs []int) int {
+      -    return xs[len(xs)-1]
+      -}
+      +func last(xs []int) int {
+      +    return xs[len(xs)]
+      +}
+      ```
+    expect:
+      final_output:
+        contains:
+          - "index out of range"

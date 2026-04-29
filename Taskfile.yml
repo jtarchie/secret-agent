@@ -1,8 +1,31 @@
 version: 3
 
+# Defaults for `eval:builtins` target an LM Studio server at
+# 127.0.0.1:1234. Override any of MODEL / API_KEY / BASE_URL on the command
+# line to point at a different OpenAI-compatible endpoint, e.g.:
+#   task eval:builtins MODEL=openrouter/anthropic/claude-sonnet-4-5 \
+#     API_KEY=$OPENROUTER_API_KEY BASE_URL=
+vars:
+  MODEL: openai/asdf
+  API_KEY: lm-studio
+  BASE_URL: http://127.0.0.1:1234/v1
+
 tasks:
   default:
     cmds:
       - gofmt -w .
       - golangci-lint run ./... --fix
       - go test -race ./...
+
+  eval:builtins:
+    desc: Run `tests:` blocks of every embedded sub-agent against an OpenAI-compatible LLM (opt-in; not part of `task default`).
+    cmds:
+      - |
+        for f in internal/bot/builtins/*.yml; do
+          echo
+          echo "=== $f ==="
+          go run ./cmd/secret-agent eval "$f" \
+            --model "{{.MODEL}}" \
+            --api-key "{{.API_KEY}}" \
+            --base-url "{{.BASE_URL}}"
+        done

@@ -3,3 +3,30 @@ description: Translates input text into a target language.
 system: |
   The user will provide text and a target language. Return only the
   translation, with no commentary.
+
+permissions:
+  memory: none
+  attachments: false
+
+tests:
+  - name: translates_to_spanish
+    input: 'Translate to Spanish: "Good morning."'
+    expect:
+      final_output:
+        contains:
+          - "Buenos días"
+
+  - name: translates_to_french
+    input: 'Translate to French: "Thank you very much."'
+    expect:
+      final_output:
+        contains:
+          - "Merci"
+
+  - name: translates_to_german
+    input: 'Translate to German: "The book is on the table."'
+    expect:
+      final_output:
+        contains:
+          - "Buch"
+          - "Tisch"
