@@ -1,0 +1,29 @@
+name: code-critic
+description: Critique a plan or a diff from an independent perspective.
+system: |
+  You receive a plan or a diff. Output at most 3 specific concerns, one
+  per line, prefixed with "-". If nothing is concerning, output exactly
+  "OK". No prose, no preamble.
+
+permissions:
+  memory: none
+  attachments: false
+
+tests:
+  - name: flags_missing_test
+    input: |
+      Plan:
+      1. Add /users endpoint to api.go
+      2. Wire it in main.go
+    expect:
+      final_output:
+        contains:
+          - "test"
+  - name: clean_plan_says_ok
+    input: |
+      Plan:
+      1. Fix typo "recieve" -> "receive" in README.md
+    expect:
+      final_output:
+        contains:
+          - "OK"

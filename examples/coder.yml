@@ -1,0 +1,87 @@
+name: coder
+# Local model. Swap to your preferred Ollama tag.
+# Provider prefix selects the base URL automatically.
+model: ollama/qwen2.5-coder:7b
+
+# 16k budget — don't accumulate untriggered messages between turns.
+permissions:
+  memory: session
+  attachments: false
+
+system: |
+  You are a coding agent operating under a 16k context budget. Be terse.
+  For each story:
+    1. If the user gives a Linear ID, call linear.get_issue first to
+       fetch the story body.
+    2. Call planner with the story. The plan may include
+       "Open: <question>" lines about library APIs.
+    3. For each Open: line about a library, call context7 to resolve
+       the question before calling critic.
+    4. Call critic with the (resolved) plan. If critic returns specific
+       concerns, revise once and re-call critic.
+    5. Use grep to locate code. Use read_file with small limits
+       (<=80 lines). Never read a whole file unless under 80 lines.
+    6. Use edit_file for changes. Use bash for tests/git.
+    7. Call critic once with the final diff summary. Then report.
+  Keep all messages short. Do not echo file contents.
+
+agents:
+  planner:
+    builtin: code-planner
+    description: Produce a numbered plan for a coding story.
+    skip_summarization: true
+  critic:
+    builtin: code-critic
+    description: Critique plan or diff from an independent perspective.
+    skip_summarization: true
+
+mcp:
+  - name: context7
+    url: https://mcp.context7.com/mcp
+    headers:
+      CONTEXT7_API_KEY: "${CONTEXT7_API_KEY}"
+      Accept: "application/json, text/event-stream"
+    tool_filter: [resolve-library-id, query-docs]
+  # Uncomment and point at your Linear MCP endpoint if you want to feed
+  # stories straight from Linear tickets.
+  # - name: linear
+  #   url: <Linear MCP endpoint>
+  #   headers:
+  #     Authorization: "Bearer ${LINEAR_API_KEY}"
+  #   tool_filter: [get_issue]
+
+tools:
+  - name: read_file
+    description: Read N lines from a file starting at offset.
+    builtin: read_file
+  - name: grep
+    description: Search a regex in a file or directory; capped results.
+    builtin: grep
+  - name: edit_file
+    description: Replace old_string with new_string in a file.
+    builtin: edit_file
+  - name: bash
+    description: Run a shell command. Output is truncated by the after_tool hook.
+    sh: bash -c "$cmd"
+    params:
+      cmd: string!
+
+# Cap any string-shaped tool result over 4000 chars before it lands in
+# the conversation. Tools that return other shapes (e.g. edit_file's
+# {replacements, path}) pass through unchanged.
+hooks:
+  - on: after_tool
+    js: |
+      (error || !result || typeof result.output !== "string" || result.output.length <= 4000)
+        ? null
+        : ({ output: result.output.slice(0, 4000) + "\n...[truncated]" })
+
+tests:
+  - name: small_rename
+    input: "Rename function foo to bar in pkg/util.go."
+    expect:
+      tool_calls:
+        - { name: planner }
+        - { name: critic }
+        - { name: grep }
+        - { name: edit_file }

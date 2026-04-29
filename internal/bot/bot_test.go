@@ -306,6 +306,117 @@ agents:
 	}
 }
 
+func TestLoadCoderExample(t *testing.T) {
+	// Ensures the example coder.yml stays in sync with the schema and the
+	// embedded code-planner / code-critic builtins.
+	b, err := Load("../../examples/coder.yml")
+	if err != nil {
+		t.Fatalf("load examples/coder.yml: %v", err)
+	}
+	if b.Name != "coder" {
+		t.Errorf("name = %q, want coder", b.Name)
+	}
+	if _, ok := b.Agents["planner"]; !ok {
+		t.Error("planner sub-agent missing")
+	}
+	if _, ok := b.Agents["critic"]; !ok {
+		t.Error("critic sub-agent missing")
+	}
+	wantBuiltins := map[string]string{
+		"read_file": "read_file",
+		"grep":      "grep",
+		"edit_file": "edit_file",
+	}
+	for _, tool := range b.Tools {
+		if want, ok := wantBuiltins[tool.Name]; ok && tool.Builtin != want {
+			t.Errorf("tool %q: builtin = %q, want %q", tool.Name, tool.Builtin, want)
+		}
+	}
+}
+
+func TestLoadBuiltinTool(t *testing.T) {
+	p := writeBot(t, `
+name: coder
+system: s
+tools:
+  - name: read_file
+    description: Read N lines from a file.
+    builtin: read_file
+  - name: grep
+    description: Search a regex.
+    builtin: grep
+  - name: edit_file
+    description: Replace text.
+    builtin: edit_file
+`)
+	b, err := Load(p)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if len(b.Tools) != 3 {
+		t.Fatalf("got %d tools, want 3", len(b.Tools))
+	}
+	for _, tool := range b.Tools {
+		if tool.Builtin == "" {
+			t.Errorf("tool %q: Builtin not set", tool.Name)
+		}
+	}
+}
+
+func TestLoadBuiltinToolUnknown(t *testing.T) {
+	p := writeBot(t, `
+name: x
+system: s
+tools:
+  - name: nope
+    description: unknown
+    builtin: not_a_real_builtin
+`)
+	_, err := Load(p)
+	if err == nil {
+		t.Fatal("expected error for unknown builtin")
+	}
+	if !strings.Contains(err.Error(), "unknown builtin") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestLoadBuiltinToolRejectsParams(t *testing.T) {
+	p := writeBot(t, `
+name: x
+system: s
+tools:
+  - name: read_file
+    description: d
+    builtin: read_file
+    params:
+      file_path: string!
+`)
+	_, err := Load(p)
+	if err == nil {
+		t.Fatal("expected error for builtin with params")
+	}
+	if !strings.Contains(err.Error(), "do not accept params") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestLoadBuiltinToolExclusiveWithSh(t *testing.T) {
+	p := writeBot(t, `
+name: x
+system: s
+tools:
+  - name: t1
+    description: d
+    builtin: read_file
+    sh: echo hi
+`)
+	_, err := Load(p)
+	if err == nil {
+		t.Fatal("expected error when both builtin and sh are set")
+	}
+}
+
 func TestLoadAgentsBuiltin(t *testing.T) {
 	p := writeBot(t, `
 name: parent

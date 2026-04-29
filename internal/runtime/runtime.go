@@ -278,8 +278,42 @@ func (bld *builder) buildOneTool(t bot.Tool) (adktool.Tool, error) {
 			return nil, fmt.Errorf("tool %q: %w", t.Name, err)
 		}
 		return built, nil
+	case t.Builtin != "":
+		built, err := buildBuiltinTool(t)
+		if err != nil {
+			return nil, fmt.Errorf("tool %q: %w", t.Name, err)
+		}
+		return built, nil
 	default:
-		return nil, fmt.Errorf("tool %q: no runtime (sh/expr/js) set", t.Name)
+		return nil, fmt.Errorf("tool %q: no runtime (sh/expr/js/builtin) set", t.Name)
+	}
+}
+
+// buildBuiltinTool dispatches a `builtin:` tool reference to its constructor.
+// Keep the cases in sync with bot.builtinToolNames so YAML-time validation and
+// runtime dispatch agree on the supported set.
+func buildBuiltinTool(t bot.Tool) (adktool.Tool, error) {
+	switch t.Builtin {
+	case "read_file":
+		built, err := tool.NewReadFile(t.Name, t.Description)
+		if err != nil {
+			return nil, fmt.Errorf("new read_file: %w", err)
+		}
+		return built, nil
+	case "grep":
+		built, err := tool.NewGrep(t.Name, t.Description)
+		if err != nil {
+			return nil, fmt.Errorf("new grep: %w", err)
+		}
+		return built, nil
+	case "edit_file":
+		built, err := tool.NewEditFile(t.Name, t.Description)
+		if err != nil {
+			return nil, fmt.Errorf("new edit_file: %w", err)
+		}
+		return built, nil
+	default:
+		return nil, fmt.Errorf("unknown builtin %q", t.Builtin)
 	}
 }
 

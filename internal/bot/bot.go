@@ -220,8 +220,13 @@ type Tool struct {
 	Sh          string           `yaml:"sh"`
 	Expr        string           `yaml:"expr"`
 	Js          string           `yaml:"js"`
-	Params      map[string]Param `yaml:"params"`
-	Hooks       []Hook           `yaml:"hooks"`
+	// Builtin selects a framework-provided tool implementation by name
+	// (e.g. "read_file", "grep", "edit_file"). When set, the tool's
+	// params and JSON schema are baked into the implementation; the
+	// YAML must not declare its own params or returns.
+	Builtin string           `yaml:"builtin,omitempty"`
+	Params  map[string]Param `yaml:"params"`
+	Hooks   []Hook           `yaml:"hooks"`
 	// Returns, when set, names a framework-side post-processor applied to
 	// the tool's stdout before the result is handed back to the LLM. The
 	// only value supported in v1 is "markdown": the tool's stdout is
@@ -812,14 +817,23 @@ func normalizeOneTool(t *Tool, idx int, path string) error {
 	t.Sh = strings.TrimSpace(t.Sh)
 	t.Expr = strings.TrimSpace(t.Expr)
 	t.Js = strings.TrimSpace(t.Js)
+	t.Builtin = strings.TrimSpace(t.Builtin)
 	if t.Name == "" {
 		return fmt.Errorf("%s: tools[%d].name is required", path, idx)
 	}
 	err := requireExactlyOne(path, fmt.Sprintf("tool %q", t.Name), []namedField{
-		{"sh", t.Sh}, {"expr", t.Expr}, {"js", t.Js},
+		{"sh", t.Sh}, {"expr", t.Expr}, {"js", t.Js}, {"builtin", t.Builtin},
 	})
 	if err != nil {
 		return err
+	}
+	if t.Builtin != "" {
+		if !IsBuiltinTool(t.Builtin) {
+			return fmt.Errorf("%s: tool %q: unknown builtin %q (want one of %s)", path, t.Name, t.Builtin, strings.Join(BuiltinToolNames(), ", "))
+		}
+		if len(t.Params) > 0 {
+			return fmt.Errorf("%s: tool %q: builtin tools do not accept params (the schema is baked in)", path, t.Name)
+		}
 	}
 	for name, p := range t.Params {
 		err := p.validate(t.Name, name)
@@ -849,6 +863,30 @@ func normalizeOneTool(t *Tool, idx int, path string) error {
 	}
 	return nil
 }
+
+// IsBuiltinTool reports whether name refers to a framework-provided tool.
+// The list is the source of truth for `builtin:` validation in YAML.
+func IsBuiltinTool(name string) bool {
+	for _, n := range builtinToolNames {
+		if n == name {
+			return true
+		}
+	}
+	return false
+}
+
+// BuiltinToolNames returns the sorted list of supported builtin tool names.
+func BuiltinToolNames() []string {
+	out := make([]string, len(builtinToolNames))
+	copy(out, builtinToolNames)
+	return out
+}
+
+// builtinToolNames is kept in package bot rather than tool to avoid a
+// load-time circular import between bot's YAML validator and tool's
+// implementations. Keep this list in sync with the dispatch in
+// runtime.builder.buildOneTool.
+var builtinToolNames = []string{"edit_file", "grep", "read_file"}
 
 type namedField struct{ name, value string }
 

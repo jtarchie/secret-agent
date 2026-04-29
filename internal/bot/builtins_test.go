@@ -12,6 +12,8 @@ func TestListBuiltins(t *testing.T) {
 		t.Fatalf("list: %v", err)
 	}
 	want := map[string]bool{
+		"code-critic":   true,
+		"code-planner":  true,
 		"code-reviewer": true,
 		"pii":           true,
 		"summarizer":    true,
