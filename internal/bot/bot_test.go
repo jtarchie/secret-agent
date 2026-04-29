@@ -306,6 +306,102 @@ agents:
 	}
 }
 
+func TestLoadAgentsBuiltin(t *testing.T) {
+	p := writeBot(t, `
+name: parent
+system: s
+agents:
+  helper:
+    builtin: summarizer
+    description: Summarizes whatever the user pastes.
+    attachments: true
+    skip_summarization: true
+`)
+	b, err := Load(p)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	ref, ok := b.Agents["helper"]
+	if !ok {
+		t.Fatal("missing helper agent")
+	}
+	if ref.Bot == nil {
+		t.Fatal("helper.Bot was not resolved")
+	}
+	if ref.Bot.Name != "summarizer" {
+		t.Errorf("child name = %q, want summarizer", ref.Bot.Name)
+	}
+	if ref.Description != "Summarizes whatever the user pastes." {
+		t.Errorf("description override lost: %q", ref.Description)
+	}
+	if !ref.Attachments {
+		t.Error("attachments override lost")
+	}
+	if !ref.SkipSummarization {
+		t.Error("skip_summarization override lost")
+	}
+}
+
+func TestLoadAgentsBuiltinUnknown(t *testing.T) {
+	p := writeBot(t, `
+name: parent
+system: s
+agents:
+  helper:
+    builtin: definitely-not-a-real-builtin
+`)
+	_, err := Load(p)
+	if err == nil {
+		t.Fatal("expected error for unknown builtin")
+	}
+	if !strings.Contains(err.Error(), "unknown builtin") {
+		t.Errorf("error should mention unknown builtin: %v", err)
+	}
+	if !strings.Contains(err.Error(), "helper") {
+		t.Errorf("error should name the agent: %v", err)
+	}
+}
+
+func TestLoadAgentsFileAndBuiltinSet(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "child.yml", `
+name: child
+system: s
+`)
+	parent := writeFile(t, dir, "parent.yml", `
+name: parent
+system: s
+agents:
+  helper:
+    file: ./child.yml
+    builtin: summarizer
+`)
+	_, err := Load(parent)
+	if err == nil {
+		t.Fatal("expected error when both file and builtin are set")
+	}
+	if !strings.Contains(err.Error(), "only one of file, builtin") {
+		t.Errorf("error should mention mutual exclusion: %v", err)
+	}
+}
+
+func TestLoadAgentsNeitherFileNorBuiltin(t *testing.T) {
+	p := writeBot(t, `
+name: parent
+system: s
+agents:
+  helper:
+    description: nothing here
+`)
+	_, err := Load(p)
+	if err == nil {
+		t.Fatal("expected error when neither file nor builtin is set")
+	}
+	if !strings.Contains(err.Error(), "exactly one of file, builtin") {
+		t.Errorf("error should mention required field: %v", err)
+	}
+}
+
 func TestLoadToolExprRuntime(t *testing.T) {
 	p := writeBot(t, `
 name: b

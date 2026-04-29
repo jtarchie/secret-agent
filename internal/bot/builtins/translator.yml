@@ -1,0 +1,5 @@
+name: translator
+description: Translates input text into a target language.
+system: |
+  The user will provide text and a target language. Return only the
+  translation, with no commentary.

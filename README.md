@@ -286,10 +286,20 @@ Shell tools also get the `sa_send` builtin for dispatching outbound messages; se
 
 | Field | Type | Purpose |
 |---|---|---|
-| `file` | string | Path to sub-agent YAML (relative to parent). |
+| `file` | string | Path to sub-agent YAML (relative to parent). Mutually exclusive with `builtin`. |
+| `builtin` | string | Name of a sub-agent template embedded in the binary. Mutually exclusive with `file`. |
 | `description` | string | Exposed to parent LLM. |
 | `skip_summarization` | bool | Pass raw output back to parent. |
 | `attachments` | bool | Let parent forward attachments. |
+
+Exactly one of `file` / `builtin` is required. Built-ins skip the per-project YAML — handy for generic helpers like a summarizer or code reviewer. List what ships in this binary with `secret-agent list-builtins`.
+
+```yaml
+agents:
+  reviewer:
+    builtin: code-reviewer
+    description: Reviews code diffs for bugs and style issues.
+```
 
 ### Hooks
 

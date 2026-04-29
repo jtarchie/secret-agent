@@ -193,11 +193,14 @@ type Cron struct {
 	Js       string `yaml:"js,omitempty"`
 }
 
-// AgentRef is a reference to a sub-agent defined in its own YAML file.
+// AgentRef is a reference to a sub-agent. Exactly one of File or Builtin
+// must be set: File points at a YAML file on disk, Builtin names a
+// sub-agent template embedded in the binary (see internal/bot/builtins/).
 // The map key under `agents:` becomes the tool name the parent LLM sees,
 // independent of the child's own `name:` field.
 type AgentRef struct {
-	File              string `yaml:"file"`
+	File              string `yaml:"file,omitempty"`
+	Builtin           string `yaml:"builtin,omitempty"`
 	Description       string `yaml:"description"`
 	SkipSummarization bool   `yaml:"skip_summarization"`
 	// Attachments, when true, exposes an optional `attachments` parameter to
@@ -575,31 +578,47 @@ func validateHookBody(h *Hook) error {
 }
 
 func Load(path string) (*Bot, error) {
-	return loadBot(path, map[string]bool{}, 0)
+	return loadBot(path, nil, "", map[string]bool{}, 0)
 }
 
+// loadBot reads, parses, and validates a single bot definition.
+//
+// File mode (data == nil): path is treated as a filesystem path. The file is
+// read and its directory becomes the base for resolving relative `file:`
+// references on child agents.
+//
+// Builtin mode (data != nil): the bytes are used directly and path is a
+// synthetic label like "builtin:<name>" used in error messages and cycle
+// detection. baseDir is empty, so relative `file:` references on child
+// agents are rejected.
+//
 //nolint:gocognit,cyclop // YAML normalize + validate is inherently long; splitting fragments spec-close field checks
-func loadBot(path string, visited map[string]bool, depth int) (*Bot, error) {
-	abs, err := filepath.Abs(path)
-	if err != nil {
-		return nil, fmt.Errorf("resolve %s: %w", path, err)
+func loadBot(path string, data []byte, baseDir string, visited map[string]bool, depth int) (*Bot, error) {
+	cycleKey := path
+	if data == nil {
+		abs, err := filepath.Abs(path)
+		if err != nil {
+			return nil, fmt.Errorf("resolve %s: %w", path, err)
+		}
+		cycleKey = abs
+		data, err = os.ReadFile(abs)
+		if err != nil {
+			return nil, fmt.Errorf("read %s: %w", path, err)
+		}
+		baseDir = filepath.Dir(abs)
 	}
-	if visited[abs] {
-		return nil, fmt.Errorf("agent cycle detected at %s", abs)
+
+	if visited[cycleKey] {
+		return nil, fmt.Errorf("agent cycle detected at %s", cycleKey)
 	}
 	if depth > maxAgentDepth {
-		return nil, fmt.Errorf("agent nesting depth exceeded at %s (max %d)", abs, maxAgentDepth)
+		return nil, fmt.Errorf("agent nesting depth exceeded at %s (max %d)", cycleKey, maxAgentDepth)
 	}
-	visited[abs] = true
-	defer delete(visited, abs)
-
-	data, err := os.ReadFile(abs)
-	if err != nil {
-		return nil, fmt.Errorf("read %s: %w", path, err)
-	}
+	visited[cycleKey] = true
+	defer delete(visited, cycleKey)
 
 	var b Bot
-	err = yaml.Unmarshal(data, &b)
+	err := yaml.Unmarshal(data, &b)
 	if err != nil {
 		return nil, fmt.Errorf("parse %s: %w", path, err)
 	}
@@ -894,7 +913,6 @@ func loadBot(path string, visited map[string]bool, depth int) (*Bot, error) {
 		}
 	}
 
-	dir := filepath.Dir(abs)
 	for key, ref := range b.Agents {
 		if !paramNameRe.MatchString(key) {
 			return nil, fmt.Errorf("%s: agent %q: name must match [A-Za-z_][A-Za-z0-9_]*", path, key)
@@ -903,16 +921,44 @@ func loadBot(path string, visited map[string]bool, depth int) (*Bot, error) {
 			return nil, fmt.Errorf("%s: agent %q conflicts with a tool or mcp server of the same name", path, key)
 		}
 		ref.File = strings.TrimSpace(ref.File)
+		ref.Builtin = strings.TrimSpace(ref.Builtin)
 		ref.Description = strings.TrimSpace(ref.Description)
-		if ref.File == "" {
-			return nil, fmt.Errorf("%s: agent %q: file is required", path, key)
+
+		set := []string{}
+		if ref.File != "" {
+			set = append(set, "file")
+		}
+		if ref.Builtin != "" {
+			set = append(set, "builtin")
+		}
+		switch len(set) {
+		case 0:
+			return nil, fmt.Errorf("%s: agent %q: exactly one of file, builtin is required", path, key)
+		case 1:
+		default:
+			return nil, fmt.Errorf("%s: agent %q: only one of file, builtin may be set (got %s)", path, key, strings.Join(set, ", "))
 		}
 
-		childPath := ref.File
-		if !filepath.IsAbs(childPath) {
-			childPath = filepath.Join(dir, childPath)
+		var (
+			child *Bot
+			err   error
+		)
+		if ref.File != "" {
+			childPath := ref.File
+			if !filepath.IsAbs(childPath) {
+				if baseDir == "" {
+					return nil, fmt.Errorf("%s: agent %q: relative file path %q cannot be resolved (built-in sub-agents have no base directory)", path, key, childPath)
+				}
+				childPath = filepath.Join(baseDir, childPath)
+			}
+			child, err = loadBot(childPath, nil, "", visited, depth+1)
+		} else {
+			builtinData, _, ok := LookupBuiltin(ref.Builtin)
+			if !ok {
+				return nil, fmt.Errorf("%s: agent %q: unknown builtin %q", path, key, ref.Builtin)
+			}
+			child, err = loadBot("builtin:"+ref.Builtin, builtinData, "", visited, depth+1)
 		}
-		child, err := loadBot(childPath, visited, depth+1)
 		if err != nil {
 			return nil, fmt.Errorf("agent %q: %w", key, err)
 		}
