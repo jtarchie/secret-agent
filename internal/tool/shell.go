@@ -4,6 +4,7 @@ package tool
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strconv"
@@ -209,7 +210,7 @@ func buildSchema(params map[string]bot.Param) (*jsonschema.Schema, error) {
 // toEnvString coerces an LLM-supplied value into a shell-env string, being
 // lenient about JSON type sloppiness (accepts "2" for an integer param, etc.).
 func toEnvString(v any, t bot.ParamType) (string, error) {
-	switch t { //nolint:exhaustive // ParamAttachment is resolved before reaching this helper
+	switch t {
 	case bot.ParamString, bot.ParamMarkdown:
 		return envFormatString(v), nil
 	case bot.ParamInteger:
@@ -218,6 +219,8 @@ func toEnvString(v any, t bot.ParamType) (string, error) {
 		return envFormatNumber(v)
 	case bot.ParamBoolean:
 		return envFormatBoolean(v)
+	case bot.ParamAttachment:
+		return "", errors.New("attachment param reached env coercion (should be resolved earlier)")
 	}
 	return "", fmt.Errorf("unknown param type %q", t)
 }

@@ -200,176 +200,204 @@ func (m *model) Init() tea.Cmd {
 	return textarea.Blink
 }
 
-//nolint:gocognit,cyclop // bubbletea Update is a standard message-type switch; splitting would scatter related cases
 func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
-		m.width = msg.Width
-		m.height = msg.Height
-		inputHeight := 3
-		helpHeight := 1
-		m.viewport.Width = msg.Width
-		m.viewport.Height = msg.Height - inputHeight - helpHeight - 1
-		m.input.SetWidth(msg.Width)
-		m.input.SetHeight(inputHeight)
-		m.help.Width = msg.Width
-		m.rebuildRenderer()
-		m.refreshViewport()
-		return m, nil
-
+		return m.handleWindowSize(msg)
 	case tea.KeyMsg:
-		switch msg.String() {
-		case "pgup":
-			m.viewport.PageUp()
-			return m, nil
-		case "pgdown":
-			m.viewport.PageDown()
-			return m, nil
-		case "ctrl+u":
-			m.viewport.HalfPageUp()
-			return m, nil
-		case "ctrl+d":
-			m.viewport.HalfPageDown()
-			return m, nil
-		}
-		switch msg.Type { //nolint:exhaustive // we only care about a small handful of keys
-		case tea.KeyCtrlC:
-			if m.waiting && m.cancel != nil {
-				m.cancel()
-				m.canceled = true
-				return m, nil
-			}
-			return m, tea.Quit
-		case tea.KeyEsc:
-			return m, tea.Quit
-		case tea.KeyUp:
-			if m.waiting || !m.inputIsSingleLine() {
-				break
-			}
-			if m.inputHistIdx > 0 {
-				m.inputHistIdx--
-				m.input.SetValue(m.inputHist[m.inputHistIdx])
-				m.input.CursorEnd()
-			}
-			return m, nil
-		case tea.KeyDown:
-			if m.waiting || !m.inputIsSingleLine() {
-				break
-			}
-			if m.inputHistIdx < len(m.inputHist) {
-				m.inputHistIdx++
-				if m.inputHistIdx == len(m.inputHist) {
-					m.input.SetValue("")
-				} else {
-					m.input.SetValue(m.inputHist[m.inputHistIdx])
-					m.input.CursorEnd()
-				}
-			}
-			return m, nil
-		case tea.KeyEnter:
-			if m.waiting {
-				return m, nil
-			}
-			if msg.Alt {
-				m.input.InsertRune('\n')
-				return m, nil
-			}
-			text := strings.TrimSpace(m.input.Value())
-			if text == "" {
-				return m, nil
-			}
-			m.input.Reset()
-			m.pushInputHist(text)
-			if strings.HasPrefix(text, "/") {
-				return m.runSlash(text)
-			}
-			cleaned, atts, err := parseAttachments(text)
-			if err != nil {
-				m.appendLine(m.errorStyle.Render("error") + ": " + err.Error())
-				return m, nil
-			}
-			m.appendLine(m.userStyle.Render("you") + ": " + text)
-			if len(atts) > 0 {
-				names := make([]string, len(atts))
-				for i, a := range atts {
-					names[i] = a.Filename
-				}
-				m.appendLine(m.statusStyle.Render("(attached: " + strings.Join(names, ", ") + ")"))
-			}
-			m.appendLine(m.thinkingLine())
-			m.replyIdx = len(m.history) - 1
-			m.replyBuf.Reset()
-			m.canceled = false
-			sendCtx, cancel := context.WithCancel(m.ctx)
-			m.cancel = cancel
-			m.stream = m.handler(sendCtx, chat.Message{Text: cleaned, Attachments: atts})
-			m.waiting = true
-			return m, tea.Batch(waitForChunk(m.stream), m.spinner.Tick)
-		}
-
+		return m.handleKey(msg)
 	case spinner.TickMsg:
-		if !m.waiting {
-			return m, nil
-		}
-		var cmd tea.Cmd
-		m.spinner, cmd = m.spinner.Update(msg)
-		if m.replyBuf.Len() == 0 && m.replyIdx >= 0 && m.replyIdx < len(m.history) {
-			m.history[m.replyIdx] = m.thinkingLine()
-			m.refreshViewport()
-		}
-		return m, cmd
-
+		return m.handleSpinnerTick(msg)
 	case chunkMsg:
-		if msg.Err != nil {
-			m.history[m.replyIdx] = m.errorStyle.Render("error") + ": " + msg.Err.Error()
-			m.hadError = true
-			m.refreshViewport()
-			return m, waitForChunk(m.stream)
-		}
-		if m.replyBuf.Len() == 0 && m.messagePrefix != "" && msg.Delta != "" {
-			m.replyBuf.WriteString(m.messagePrefix)
-		}
-		m.replyBuf.WriteString(msg.Delta)
-		m.history[m.replyIdx] = m.botStyle.Render(m.botName) + ": " + m.replyBuf.String()
-		m.refreshViewport()
-		return m, waitForChunk(m.stream)
-
+		return m.handleChunk(msg)
 	case tea.MouseMsg:
 		var cmd tea.Cmd
 		m.viewport, cmd = m.viewport.Update(msg)
 		return m, cmd
-
 	case streamDoneMsg:
-		if m.replyBuf.Len() == 0 && !m.hadError && m.replyIdx >= 0 && m.replyIdx < len(m.history) {
-			m.history = append(m.history[:m.replyIdx], m.history[m.replyIdx+1:]...)
-		}
-		if m.replyBuf.Len() > 0 {
-			m.lastReply = m.replyBuf.String()
-			if rendered, ok := m.renderMarkdown(m.lastReply); ok && m.replyIdx >= 0 && m.replyIdx < len(m.history) {
-				m.history[m.replyIdx] = m.botStyle.Render(m.botName) + ":\n" + rendered
-			}
-		}
-		if m.canceled {
-			m.history = append(m.history, m.statusStyle.Render("(canceled)"))
-		}
-		m.history = append(m.history, "")
-		m.refreshViewport()
-		if m.cancel != nil {
-			m.cancel()
-			m.cancel = nil
-		}
-		m.waiting = false
-		m.stream = nil
-		m.replyIdx = -1
-		m.replyBuf.Reset()
-		m.canceled = false
-		m.hadError = false
-		return m, nil
+		return m.handleStreamDone()
 	}
 
 	var cmd tea.Cmd
 	m.input, cmd = m.input.Update(msg)
 	return m, cmd
+}
+
+func (m *model) handleWindowSize(msg tea.WindowSizeMsg) (tea.Model, tea.Cmd) {
+	m.width = msg.Width
+	m.height = msg.Height
+	inputHeight := 3
+	helpHeight := 1
+	m.viewport.Width = msg.Width
+	m.viewport.Height = msg.Height - inputHeight - helpHeight - 1
+	m.input.SetWidth(msg.Width)
+	m.input.SetHeight(inputHeight)
+	m.help.Width = msg.Width
+	m.rebuildRenderer()
+	m.refreshViewport()
+	return m, nil
+}
+
+func (m *model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "pgup":
+		m.viewport.PageUp()
+		return m, nil
+	case "pgdown":
+		m.viewport.PageDown()
+		return m, nil
+	case "ctrl+u":
+		m.viewport.HalfPageUp()
+		return m, nil
+	case "ctrl+d":
+		m.viewport.HalfPageDown()
+		return m, nil
+	case "ctrl+c":
+		if m.waiting && m.cancel != nil {
+			m.cancel()
+			m.canceled = true
+			return m, nil
+		}
+		return m, tea.Quit
+	case "esc":
+		return m, tea.Quit
+	case "up":
+		m.scrollHistory(-1)
+		return m, nil
+	case "down":
+		m.scrollHistory(+1)
+		return m, nil
+	case "alt+enter":
+		if !m.waiting {
+			m.input.InsertRune('\n')
+		}
+		return m, nil
+	case "enter":
+		return m.submitInput()
+	}
+
+	var cmd tea.Cmd
+	m.input, cmd = m.input.Update(msg)
+	return m, cmd
+}
+
+// scrollHistory walks the input history in dir (-1=up, +1=down). It is a
+// no-op while a turn is in flight or when the input has already been
+// expanded to multi-line (treating up/down as cursor moves there).
+func (m *model) scrollHistory(dir int) {
+	if m.waiting || !m.inputIsSingleLine() {
+		return
+	}
+	switch {
+	case dir < 0 && m.inputHistIdx > 0:
+		m.inputHistIdx--
+		m.input.SetValue(m.inputHist[m.inputHistIdx])
+		m.input.CursorEnd()
+	case dir > 0 && m.inputHistIdx < len(m.inputHist):
+		m.inputHistIdx++
+		if m.inputHistIdx == len(m.inputHist) {
+			m.input.SetValue("")
+		} else {
+			m.input.SetValue(m.inputHist[m.inputHistIdx])
+			m.input.CursorEnd()
+		}
+	}
+}
+
+// submitInput sends the current input as a turn (or runs a slash command).
+// Returns the resulting (model, cmd) pair the bubbletea Update expects.
+func (m *model) submitInput() (tea.Model, tea.Cmd) {
+	if m.waiting {
+		return m, nil
+	}
+	text := strings.TrimSpace(m.input.Value())
+	if text == "" {
+		return m, nil
+	}
+	m.input.Reset()
+	m.pushInputHist(text)
+	if strings.HasPrefix(text, "/") {
+		return m.runSlash(text)
+	}
+	cleaned, atts, err := parseAttachments(text)
+	if err != nil {
+		m.appendLine(m.errorStyle.Render("error") + ": " + err.Error())
+		return m, nil
+	}
+	m.appendLine(m.userStyle.Render("you") + ": " + text)
+	if len(atts) > 0 {
+		names := make([]string, len(atts))
+		for i, a := range atts {
+			names[i] = a.Filename
+		}
+		m.appendLine(m.statusStyle.Render("(attached: " + strings.Join(names, ", ") + ")"))
+	}
+	m.appendLine(m.thinkingLine())
+	m.replyIdx = len(m.history) - 1
+	m.replyBuf.Reset()
+	m.canceled = false
+	sendCtx, cancel := context.WithCancel(m.ctx)
+	m.cancel = cancel
+	m.stream = m.handler(sendCtx, chat.Message{Text: cleaned, Attachments: atts})
+	m.waiting = true
+	return m, tea.Batch(waitForChunk(m.stream), m.spinner.Tick)
+}
+
+func (m *model) handleSpinnerTick(msg spinner.TickMsg) (tea.Model, tea.Cmd) {
+	if !m.waiting {
+		return m, nil
+	}
+	var cmd tea.Cmd
+	m.spinner, cmd = m.spinner.Update(msg)
+	if m.replyBuf.Len() == 0 && m.replyIdx >= 0 && m.replyIdx < len(m.history) {
+		m.history[m.replyIdx] = m.thinkingLine()
+		m.refreshViewport()
+	}
+	return m, cmd
+}
+
+func (m *model) handleChunk(msg chunkMsg) (tea.Model, tea.Cmd) {
+	if msg.Err != nil {
+		m.history[m.replyIdx] = m.errorStyle.Render("error") + ": " + msg.Err.Error()
+		m.hadError = true
+		m.refreshViewport()
+		return m, waitForChunk(m.stream)
+	}
+	if m.replyBuf.Len() == 0 && m.messagePrefix != "" && msg.Delta != "" {
+		m.replyBuf.WriteString(m.messagePrefix)
+	}
+	m.replyBuf.WriteString(msg.Delta)
+	m.history[m.replyIdx] = m.botStyle.Render(m.botName) + ": " + m.replyBuf.String()
+	m.refreshViewport()
+	return m, waitForChunk(m.stream)
+}
+
+func (m *model) handleStreamDone() (tea.Model, tea.Cmd) {
+	if m.replyBuf.Len() == 0 && !m.hadError && m.replyIdx >= 0 && m.replyIdx < len(m.history) {
+		m.history = append(m.history[:m.replyIdx], m.history[m.replyIdx+1:]...)
+	}
+	if m.replyBuf.Len() > 0 {
+		m.lastReply = m.replyBuf.String()
+		if rendered, ok := m.renderMarkdown(m.lastReply); ok && m.replyIdx >= 0 && m.replyIdx < len(m.history) {
+			m.history[m.replyIdx] = m.botStyle.Render(m.botName) + ":\n" + rendered
+		}
+	}
+	if m.canceled {
+		m.history = append(m.history, m.statusStyle.Render("(canceled)"))
+	}
+	m.history = append(m.history, "")
+	m.refreshViewport()
+	if m.cancel != nil {
+		m.cancel()
+		m.cancel = nil
+	}
+	m.waiting = false
+	m.stream = nil
+	m.replyIdx = -1
+	m.replyBuf.Reset()
+	m.canceled = false
+	m.hadError = false
+	return m, nil
 }
 
 func (m *model) View() string {

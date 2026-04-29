@@ -11,7 +11,7 @@ import (
 type CLI struct {
 	Run          RunCmd          `cmd:"" help:"run bots over configured transports"`
 	Eval         EvalCmd         `cmd:"" help:"run a bot's tests: block as an offline eval"`
-	SignalLink   SignalLinkCmd   `cmd:"" help:"QR-link a Signal secondary device"           name:"signal-link"`
+	SignalLink   SignalLinkCmd   `cmd:"" help:"QR-link a Signal secondary device"               name:"signal-link"`
 	ListBuiltins ListBuiltinsCmd `cmd:"" help:"list built-in sub-agents embedded in the binary" name:"list-builtins"`
 }
 

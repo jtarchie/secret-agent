@@ -13,6 +13,32 @@ import (
 	"github.com/jtarchie/secret-agent/internal/model"
 )
 
+// printEvalResult writes one test's PASS/FAIL line plus tool trace and
+// failures to stdout. Returns true if the case passed.
+func printEvalResult(r eval.Result, verbose bool) bool {
+	status := "PASS"
+	if !r.Passed {
+		status = "FAIL"
+	}
+	fmt.Printf("%s  %s  (%s)\n", status, r.Name, r.Duration.Round(time.Millisecond))
+	if verbose || !r.Passed {
+		if len(r.ToolCalls) > 0 {
+			names := make([]string, len(r.ToolCalls))
+			for i, c := range r.ToolCalls {
+				names[i] = c.Name
+			}
+			fmt.Printf("      tools: %v\n", names)
+		}
+		if r.FinalText != "" {
+			fmt.Printf("      output: %q\n", r.FinalText)
+		}
+	}
+	for _, f := range r.Failures {
+		fmt.Printf("      - %s\n", f)
+	}
+	return r.Passed
+}
+
 // EvalCmd runs a bot's `tests:` block as an offline eval.
 type EvalCmd struct {
 	ModelFlags
@@ -20,7 +46,6 @@ type EvalCmd struct {
 	Bot     string `arg:""                                                                  help:"path to the bot YAML with a tests: block" type:"existingfile"`
 }
 
-//nolint:cyclop // eval result reporting is sequential and clearer as one function
 func (c *EvalCmd) Run() error {
 	b, err := bot.Load(c.Bot)
 	if err != nil {
@@ -57,28 +82,10 @@ func (c *EvalCmd) Run() error {
 
 	passed, failed := 0, 0
 	for _, r := range results {
-		status := "PASS"
-		if !r.Passed {
-			status = "FAIL"
-			failed++
-		} else {
+		if printEvalResult(r, c.Verbose) {
 			passed++
-		}
-		fmt.Printf("%s  %s  (%s)\n", status, r.Name, r.Duration.Round(time.Millisecond))
-		if c.Verbose || !r.Passed {
-			if len(r.ToolCalls) > 0 {
-				names := make([]string, len(r.ToolCalls))
-				for i, c := range r.ToolCalls {
-					names[i] = c.Name
-				}
-				fmt.Printf("      tools: %v\n", names)
-			}
-			if r.FinalText != "" {
-				fmt.Printf("      output: %q\n", r.FinalText)
-			}
-		}
-		for _, f := range r.Failures {
-			fmt.Printf("      - %s\n", f)
+		} else {
+			failed++
 		}
 	}
 	fmt.Printf("\n%d passed, %d failed (of %d)\n", passed, failed, len(results))

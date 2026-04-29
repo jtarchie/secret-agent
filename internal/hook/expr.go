@@ -15,13 +15,13 @@ import (
 //
 // A returned value of nil signals pass-through to the caller. Any other
 // value replaces the payload (subject to per-event rules in adapter.go).
-func compileExpr(code string) (func(context.Context, map[string]any) (any, error), error) {
+func compileExpr(code string) (func(context.Context, map[string]any) (Result, error), error) {
 	program, err := expr.Compile(code, expr.AllowUndefinedVariables())
 	if err != nil {
 		return nil, fmt.Errorf("compile expr: %w", err)
 	}
 
-	return func(_ context.Context, env map[string]any) (any, error) {
+	return func(_ context.Context, env map[string]any) (Result, error) {
 		// Shallow-copy so the error() binding doesn't leak across calls.
 		bindings := make(map[string]any, len(env)+1)
 		for k, v := range env {
@@ -30,6 +30,13 @@ func compileExpr(code string) (func(context.Context, map[string]any) (any, error
 		bindings["error"] = func(msg string) any {
 			panic(errors.New(msg))
 		}
-		return expr.Run(program, bindings)
+		out, err := expr.Run(program, bindings)
+		if err != nil {
+			return PassThrough, fmt.Errorf("run expr: %w", err)
+		}
+		if out == nil {
+			return PassThrough, nil
+		}
+		return NewValue(out), nil
 	}, nil
 }

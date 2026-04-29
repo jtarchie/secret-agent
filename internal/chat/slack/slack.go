@@ -154,9 +154,9 @@ func (t *Transport) Run(ctx context.Context, dispatcher chat.Dispatcher) error {
 	// (TLS errors, server-initiated close, transient auth blips). Wrap it
 	// so the bot stays alive across hiccups instead of exiting silently.
 	const (
-		minBackoff   = time.Second
-		maxBackoff   = 30 * time.Second
-		resetWindow  = 60 * time.Second
+		minBackoff  = time.Second
+		maxBackoff  = 30 * time.Second
+		resetWindow = 60 * time.Second
 	)
 	backoff := minBackoff
 	for {
@@ -276,7 +276,17 @@ func (t *Transport) handleEvent(
 	botUserID string,
 	evt socketmode.Event,
 ) {
-	switch evt.Type { //nolint:exhaustive // we only handle the subset of events we care about
+	logEventType(log, evt.Type)
+	if evt.Type == socketmode.EventTypeEventsAPI {
+		t.handleEventsAPI(ctx, log, sm, api, dispatcher, lockFor, seen, botID, botUserID, evt)
+	}
+}
+
+// logEventType emits a one-line log entry describing each socket-mode
+// event type at an appropriate level. Unhandled types fall through to a
+// debug "ignoring" line.
+func logEventType(log *slog.Logger, t socketmode.EventType) {
+	switch t {
 	case socketmode.EventTypeConnecting:
 		log.Info("slack socket mode: connecting")
 	case socketmode.EventTypeConnected:
@@ -286,9 +296,9 @@ func (t *Transport) handleEvent(
 	case socketmode.EventTypeHello:
 		log.Debug("slack socket mode: hello")
 	case socketmode.EventTypeEventsAPI:
-		t.handleEventsAPI(ctx, log, sm, api, dispatcher, lockFor, seen, botID, botUserID, evt)
+		// EventsAPI events are routed to handleEventsAPI by the caller; no log here.
 	default:
-		log.Debug("slack socket mode: ignoring event", "type", evt.Type)
+		log.Debug("slack socket mode: ignoring event", "type", t)
 	}
 }
 

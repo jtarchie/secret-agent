@@ -15,18 +15,38 @@ import (
 	"github.com/jtarchie/secret-agent/internal/bot"
 )
 
+// Result is the outcome of running a hook script. HasValue reports whether
+// the script produced a replacement payload; Value is meaningful only when
+// HasValue is true. A zero Result means "pass through" — used by ADK
+// callbacks to continue with the original args/result.
+type Result struct {
+	Value    any
+	HasValue bool
+}
+
+// PassThrough is the zero Result indicating no payload override.
+var PassThrough = Result{}
+
+// NewValue wraps v as a replacement payload. Callers should use this
+// rather than constructing Result literals directly so HasValue stays in
+// sync with the presence of a value.
+func NewValue(v any) Result {
+	return Result{Value: v, HasValue: true}
+}
+
 // Compiled is a hook ready to run. Filter, when non-empty, restricts the
 // hook to a single tool name (tool-scoped hooks get Filter set to the
 // owning tool's name; bot-level hooks set it explicitly via `tool:`).
 type Compiled struct {
 	Event  bot.HookEvent
 	Filter string
-	run    func(ctx context.Context, env map[string]any) (any, error)
+	run    func(ctx context.Context, env map[string]any) (Result, error)
 }
 
-// Run executes the hook's script against the given env and returns the
-// script's completion value (may be nil for pass-through) or an error.
-func (c Compiled) Run(ctx context.Context, env map[string]any) (any, error) {
+// Run executes the hook's script against the given env. The returned
+// Result is PassThrough when the script signaled no replacement; an error
+// vetoes the surrounding ADK callback.
+func (c Compiled) Run(ctx context.Context, env map[string]any) (Result, error) {
 	return c.run(ctx, env)
 }
 
@@ -44,7 +64,7 @@ func Compile(hs []bot.Hook) ([]Compiled, error) {
 	return out, nil
 }
 
-func compileOne(h bot.Hook) (func(context.Context, map[string]any) (any, error), error) {
+func compileOne(h bot.Hook) (func(context.Context, map[string]any) (Result, error), error) {
 	switch {
 	case h.Sh != "":
 		return compileSh(h.Sh)

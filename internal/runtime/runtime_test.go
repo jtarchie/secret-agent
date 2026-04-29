@@ -194,7 +194,6 @@ func TestBuildUserContentMissingFile(t *testing.T) {
 
 func TestNewStatelessFlag(t *testing.T) {
 	ctx := context.Background()
-
 	b := writeBot(t, `
 name: b
 system: s

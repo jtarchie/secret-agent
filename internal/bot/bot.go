@@ -591,21 +591,10 @@ func Load(path string) (*Bot, error) {
 // synthetic label like "builtin:<name>" used in error messages and cycle
 // detection. baseDir is empty, so relative `file:` references on child
 // agents are rejected.
-//
-//nolint:gocognit,cyclop // YAML normalize + validate is inherently long; splitting fragments spec-close field checks
 func loadBot(path string, data []byte, baseDir string, visited map[string]bool, depth int) (*Bot, error) {
-	cycleKey := path
-	if data == nil {
-		abs, err := filepath.Abs(path)
-		if err != nil {
-			return nil, fmt.Errorf("resolve %s: %w", path, err)
-		}
-		cycleKey = abs
-		data, err = os.ReadFile(abs)
-		if err != nil {
-			return nil, fmt.Errorf("read %s: %w", path, err)
-		}
-		baseDir = filepath.Dir(abs)
+	cycleKey, baseDir, data, err := readBotData(path, data, baseDir)
+	if err != nil {
+		return nil, err
 	}
 
 	if visited[cycleKey] {
@@ -618,232 +607,24 @@ func loadBot(path string, data []byte, baseDir string, visited map[string]bool, 
 	defer delete(visited, cycleKey)
 
 	var b Bot
-	err := yaml.Unmarshal(data, &b)
+	err = yaml.Unmarshal(data, &b)
 	if err != nil {
 		return nil, fmt.Errorf("parse %s: %w", path, err)
 	}
 
-	b.Name = strings.TrimSpace(b.Name)
-	b.System = strings.TrimSpace(b.System)
-	b.Model = strings.TrimSpace(b.Model)
-	b.APIKeyEnv = strings.TrimSpace(b.APIKeyEnv)
-	b.BaseURL = strings.TrimSpace(b.BaseURL)
-
-	if b.Name == "" {
-		return nil, fmt.Errorf("%s: name is required", path)
-	}
-	if b.System == "" {
-		return nil, fmt.Errorf("%s: system is required", path)
-	}
-	if b.Model != "" {
-		idx := strings.Index(b.Model, "/")
-		if idx <= 0 || strings.TrimSpace(b.Model[:idx]) == "" {
-			return nil, fmt.Errorf("%s: model: %q must be in the form provider/model-name", path, b.Model)
-		}
+	err = normalizeBotHeader(&b, path)
+	if err != nil {
+		return nil, err
 	}
 
-	switch b.Permissions.Memory {
-	case "", MemoryFull, MemorySession, MemoryNone:
-	default:
-		return nil, fmt.Errorf("%s: permissions.memory: %q is not a valid mode (want full|session|none)", path, b.Permissions.Memory)
+	err = normalizeScopeLists(&b, path)
+	if err != nil {
+		return nil, err
 	}
 
-	if len(b.Triggers) > 0 {
-		seen := make(map[string]struct{}, len(b.Triggers))
-		deduped := b.Triggers[:0]
-		for i, t := range b.Triggers {
-			t = strings.TrimSpace(t)
-			if t == "" {
-				return nil, fmt.Errorf("%s: triggers[%d]: must not be empty", path, i)
-			}
-			key := strings.ToLower(t)
-			if _, dup := seen[key]; dup {
-				continue
-			}
-			seen[key] = struct{}{}
-			deduped = append(deduped, t)
-		}
-		b.Triggers = deduped
-	}
-
-	if len(b.Users) > 0 {
-		seen := make(map[string]struct{}, len(b.Users))
-		deduped := b.Users[:0]
-		for i, u := range b.Users {
-			u = strings.TrimSpace(u)
-			if u == "" {
-				return nil, fmt.Errorf("%s: users[%d]: must not be empty", path, i)
-			}
-			if !e164Re.MatchString(u) {
-				return nil, fmt.Errorf("%s: users[%d]: %q is not a valid E.164 phone number", path, i, u)
-			}
-			if _, dup := seen[u]; dup {
-				continue
-			}
-			seen[u] = struct{}{}
-			deduped = append(deduped, u)
-		}
-		b.Users = deduped
-	}
-
-	if len(b.Groups) > 0 {
-		seen := make(map[string]struct{}, len(b.Groups))
-		deduped := b.Groups[:0]
-		for i, g := range b.Groups {
-			g = strings.TrimSpace(g)
-			if g == "" {
-				return nil, fmt.Errorf("%s: groups[%d]: must not be empty", path, i)
-			}
-			if _, dup := seen[g]; dup {
-				continue
-			}
-			seen[g] = struct{}{}
-			deduped = append(deduped, g)
-		}
-		b.Groups = deduped
-	}
-
-	if len(b.SlackUsers) > 0 {
-		seen := make(map[string]struct{}, len(b.SlackUsers))
-		deduped := b.SlackUsers[:0]
-		for i, u := range b.SlackUsers {
-			u = strings.TrimSpace(u)
-			if u == "" {
-				return nil, fmt.Errorf("%s: slack_users[%d]: must not be empty", path, i)
-			}
-			if !slackUserRe.MatchString(u) {
-				return nil, fmt.Errorf("%s: slack_users[%d]: %q is not a valid Slack user ID (expected U... or W...)", path, i, u)
-			}
-			if _, dup := seen[u]; dup {
-				continue
-			}
-			seen[u] = struct{}{}
-			deduped = append(deduped, u)
-		}
-		b.SlackUsers = deduped
-	}
-
-	if len(b.SlackChannels) > 0 {
-		seen := make(map[string]struct{}, len(b.SlackChannels))
-		deduped := b.SlackChannels[:0]
-		for i, c := range b.SlackChannels {
-			c = strings.TrimSpace(c)
-			if c == "" {
-				return nil, fmt.Errorf("%s: slack_channels[%d]: must not be empty", path, i)
-			}
-			if !slackChannelRe.MatchString(c) {
-				return nil, fmt.Errorf("%s: slack_channels[%d]: %q is not a valid Slack channel ID (expected C..., D..., or G...)", path, i, c)
-			}
-			if _, dup := seen[c]; dup {
-				continue
-			}
-			seen[c] = struct{}{}
-			deduped = append(deduped, c)
-		}
-		b.SlackChannels = deduped
-	}
-
-	if len(b.IMessageUsers) > 0 {
-		seen := make(map[string]struct{}, len(b.IMessageUsers))
-		deduped := b.IMessageUsers[:0]
-		for i, u := range b.IMessageUsers {
-			u = strings.TrimSpace(u)
-			if u == "" {
-				return nil, fmt.Errorf("%s: imessage_users[%d]: must not be empty", path, i)
-			}
-			if !e164Re.MatchString(u) && !imessageEmailRe.MatchString(u) {
-				return nil, fmt.Errorf("%s: imessage_users[%d]: %q is not a valid iMessage handle (expected E.164 phone or email)", path, i, u)
-			}
-			if _, dup := seen[u]; dup {
-				continue
-			}
-			seen[u] = struct{}{}
-			deduped = append(deduped, u)
-		}
-		b.IMessageUsers = deduped
-	}
-
-	if len(b.IMessageChats) > 0 {
-		seen := make(map[string]struct{}, len(b.IMessageChats))
-		deduped := b.IMessageChats[:0]
-		for i, c := range b.IMessageChats {
-			c = strings.TrimSpace(c)
-			if c == "" {
-				return nil, fmt.Errorf("%s: imessage_chats[%d]: must not be empty", path, i)
-			}
-			if _, dup := seen[c]; dup {
-				continue
-			}
-			seen[c] = struct{}{}
-			deduped = append(deduped, c)
-		}
-		b.IMessageChats = deduped
-	}
-
-	for i := range b.Tools {
-		t := &b.Tools[i]
-		t.Name = strings.TrimSpace(t.Name)
-		t.Description = strings.TrimSpace(t.Description)
-		t.Sh = strings.TrimSpace(t.Sh)
-		t.Expr = strings.TrimSpace(t.Expr)
-		t.Js = strings.TrimSpace(t.Js)
-		if t.Name == "" {
-			return nil, fmt.Errorf("%s: tools[%d].name is required", path, i)
-		}
-		set := []string{}
-		if t.Sh != "" {
-			set = append(set, "sh")
-		}
-		if t.Expr != "" {
-			set = append(set, "expr")
-		}
-		if t.Js != "" {
-			set = append(set, "js")
-		}
-		switch len(set) {
-		case 0:
-			return nil, fmt.Errorf("%s: tool %q: exactly one of sh, expr, js is required", path, t.Name)
-		case 1:
-		default:
-			return nil, fmt.Errorf("%s: tool %q: only one of sh, expr, js may be set (got %s)", path, t.Name, strings.Join(set, ", "))
-		}
-		for name, p := range t.Params {
-			err := p.validate(t.Name, name)
-			if err != nil {
-				return nil, fmt.Errorf("%s: %w", path, err)
-			}
-		}
-		// For every markdown param, reserve the "<name>_html" slot so the
-		// auto-injected rendered-HTML companion never shadows a user param.
-		paramLower := make(map[string]struct{}, len(t.Params))
-		for name := range t.Params {
-			paramLower[strings.ToLower(name)] = struct{}{}
-		}
-		for name, p := range t.Params {
-			if p.Type != ParamMarkdown {
-				continue
-			}
-			collide := strings.ToLower(name) + "_html"
-			if _, exists := paramLower[collide]; exists {
-				return nil, fmt.Errorf("%s: tool %q param %q (markdown): conflicting param %q would shadow the injected HTML companion", path, t.Name, name, collide)
-			}
-		}
-		t.Returns = strings.TrimSpace(t.Returns)
-		switch t.Returns {
-		case "", "markdown":
-		default:
-			return nil, fmt.Errorf("%s: tool %q: returns: %q is not a valid mode (want \"markdown\" or empty)", path, t.Name, t.Returns)
-		}
-		if t.Returns != "" && t.Sh == "" {
-			return nil, fmt.Errorf("%s: tool %q: returns is only supported on sh: tools (not expr or js)", path, t.Name)
-		}
-		for j := range t.Hooks {
-			h := &t.Hooks[j]
-			err := normalizeToolHook(h)
-			if err != nil {
-				return nil, fmt.Errorf("%s: tool %q hook[%d]: %w", path, t.Name, j, err)
-			}
-		}
+	err = normalizeTools(&b, path)
+	if err != nil {
+		return nil, err
 	}
 
 	toolNames := make(map[string]struct{}, len(b.Tools))
@@ -851,16 +632,9 @@ func loadBot(path string, data []byte, baseDir string, visited map[string]bool, 
 		toolNames[t.Name] = struct{}{}
 	}
 
-	for i := range b.MCP {
-		m := &b.MCP[i]
-		err := normalizeMCPServer(m)
-		if err != nil {
-			return nil, fmt.Errorf("%s: mcp[%d]: %w", path, i, err)
-		}
-		if _, clash := toolNames[m.Name]; clash {
-			return nil, fmt.Errorf("%s: mcp %q conflicts with a tool of the same name", path, m.Name)
-		}
-		toolNames[m.Name] = struct{}{}
+	err = normalizeMCPList(&b, toolNames, path)
+	if err != nil {
+		return nil, err
 	}
 
 	for i := range b.Hooks {
@@ -871,102 +645,378 @@ func loadBot(path string, data []byte, baseDir string, visited map[string]bool, 
 		}
 	}
 
-	seenCronNames := make(map[string]struct{}, len(b.Cron))
+	err = normalizeCronList(&b, path)
+	if err != nil {
+		return nil, err
+	}
+
+	err = normalizeTestList(&b, path)
+	if err != nil {
+		return nil, err
+	}
+
+	err = resolveAgents(&b, toolNames, path, baseDir, visited, depth)
+	if err != nil {
+		return nil, err
+	}
+
+	return &b, nil
+}
+
+// readBotData resolves the cycle key, reads file bytes (or accepts the
+// supplied builtin bytes), and returns the directory used as a base for
+// child agent paths.
+func readBotData(path string, data []byte, baseDir string) (cycleKey, resolvedBaseDir string, raw []byte, err error) {
+	cycleKey = path
+	if data != nil {
+		return cycleKey, baseDir, data, nil
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", "", nil, fmt.Errorf("resolve %s: %w", path, err)
+	}
+	raw, err = os.ReadFile(abs)
+	if err != nil {
+		return "", "", nil, fmt.Errorf("read %s: %w", path, err)
+	}
+	return abs, filepath.Dir(abs), raw, nil
+}
+
+// normalizeBotHeader trims top-level scalar fields and validates required
+// values (name/system) plus the model/memory enums.
+func normalizeBotHeader(b *Bot, path string) error {
+	b.Name = strings.TrimSpace(b.Name)
+	b.System = strings.TrimSpace(b.System)
+	b.Model = strings.TrimSpace(b.Model)
+	b.APIKeyEnv = strings.TrimSpace(b.APIKeyEnv)
+	b.BaseURL = strings.TrimSpace(b.BaseURL)
+
+	if b.Name == "" {
+		return fmt.Errorf("%s: name is required", path)
+	}
+	if b.System == "" {
+		return fmt.Errorf("%s: system is required", path)
+	}
+	if b.Model != "" {
+		idx := strings.Index(b.Model, "/")
+		if idx <= 0 || strings.TrimSpace(b.Model[:idx]) == "" {
+			return fmt.Errorf("%s: model: %q must be in the form provider/model-name", path, b.Model)
+		}
+	}
+
+	switch b.Permissions.Memory {
+	case "", MemoryFull, MemorySession, MemoryNone:
+	default:
+		return fmt.Errorf("%s: permissions.memory: %q is not a valid mode (want full|session|none)", path, b.Permissions.Memory)
+	}
+	return nil
+}
+
+// normalizeScopeLists trims, dedups, and validates each scope list:
+// triggers (case-insensitive dedup), users + groups, slack_users +
+// slack_channels, imessage_users + imessage_chats.
+func normalizeScopeLists(b *Bot, path string) error {
+	deduped, err := dedupStringList(b.Triggers, "triggers", path, true, nil)
+	if err != nil {
+		return err
+	}
+	b.Triggers = deduped
+
+	validE164 := func(s string) (bool, string) { return e164Re.MatchString(s), "is not a valid E.164 phone number" }
+	validSlackUser := func(s string) (bool, string) {
+		return slackUserRe.MatchString(s), "is not a valid Slack user ID (expected U... or W...)"
+	}
+	validSlackChannel := func(s string) (bool, string) {
+		return slackChannelRe.MatchString(s), "is not a valid Slack channel ID (expected C..., D..., or G...)"
+	}
+	validIMessageHandle := func(s string) (bool, string) {
+		return e164Re.MatchString(s) || imessageEmailRe.MatchString(s), "is not a valid iMessage handle (expected E.164 phone or email)"
+	}
+
+	b.Users, err = dedupStringList(b.Users, "users", path, false, validE164)
+	if err != nil {
+		return err
+	}
+	b.Groups, err = dedupStringList(b.Groups, "groups", path, false, nil)
+	if err != nil {
+		return err
+	}
+	b.SlackUsers, err = dedupStringList(b.SlackUsers, "slack_users", path, false, validSlackUser)
+	if err != nil {
+		return err
+	}
+	b.SlackChannels, err = dedupStringList(b.SlackChannels, "slack_channels", path, false, validSlackChannel)
+	if err != nil {
+		return err
+	}
+	b.IMessageUsers, err = dedupStringList(b.IMessageUsers, "imessage_users", path, false, validIMessageHandle)
+	if err != nil {
+		return err
+	}
+	b.IMessageChats, err = dedupStringList(b.IMessageChats, "imessage_chats", path, false, nil)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+// dedupStringList trims each entry, rejects empties, dedups (lowercased
+// when caseInsensitive), and runs an optional per-entry validator that
+// returns (ok, reason). The reason is appended to the field-prefixed error
+// when validation fails.
+func dedupStringList(items []string, fieldName, path string, caseInsensitive bool, validate func(string) (bool, string)) ([]string, error) {
+	if len(items) == 0 {
+		return items, nil
+	}
+	seen := make(map[string]struct{}, len(items))
+	out := items[:0]
+	for i, raw := range items {
+		v := strings.TrimSpace(raw)
+		if v == "" {
+			return nil, fmt.Errorf("%s: %s[%d]: must not be empty", path, fieldName, i)
+		}
+		if validate != nil {
+			ok, reason := validate(v)
+			if !ok {
+				return nil, fmt.Errorf("%s: %s[%d]: %q %s", path, fieldName, i, v, reason)
+			}
+		}
+		key := v
+		if caseInsensitive {
+			key = strings.ToLower(v)
+		}
+		if _, dup := seen[key]; dup {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, v)
+	}
+	return out, nil
+}
+
+// normalizeTools trims tool fields and validates per-tool runtime
+// exclusivity, params, markdown _html shadowing, return mode, and hooks.
+func normalizeTools(b *Bot, path string) error {
+	for i := range b.Tools {
+		err := normalizeOneTool(&b.Tools[i], i, path)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func normalizeOneTool(t *Tool, idx int, path string) error {
+	t.Name = strings.TrimSpace(t.Name)
+	t.Description = strings.TrimSpace(t.Description)
+	t.Sh = strings.TrimSpace(t.Sh)
+	t.Expr = strings.TrimSpace(t.Expr)
+	t.Js = strings.TrimSpace(t.Js)
+	if t.Name == "" {
+		return fmt.Errorf("%s: tools[%d].name is required", path, idx)
+	}
+	err := requireExactlyOne(path, fmt.Sprintf("tool %q", t.Name), []namedField{
+		{"sh", t.Sh}, {"expr", t.Expr}, {"js", t.Js},
+	})
+	if err != nil {
+		return err
+	}
+	for name, p := range t.Params {
+		err := p.validate(t.Name, name)
+		if err != nil {
+			return fmt.Errorf("%s: %w", path, err)
+		}
+	}
+	err = checkMarkdownHTMLCollisions(t, path)
+	if err != nil {
+		return err
+	}
+	t.Returns = strings.TrimSpace(t.Returns)
+	switch t.Returns {
+	case "", "markdown":
+	default:
+		return fmt.Errorf("%s: tool %q: returns: %q is not a valid mode (want \"markdown\" or empty)", path, t.Name, t.Returns)
+	}
+	if t.Returns != "" && t.Sh == "" {
+		return fmt.Errorf("%s: tool %q: returns is only supported on sh: tools (not expr or js)", path, t.Name)
+	}
+	for j := range t.Hooks {
+		h := &t.Hooks[j]
+		err := normalizeToolHook(h)
+		if err != nil {
+			return fmt.Errorf("%s: tool %q hook[%d]: %w", path, t.Name, j, err)
+		}
+	}
+	return nil
+}
+
+type namedField struct{ name, value string }
+
+// requireExactlyOne checks that exactly one of the named fields has a
+// non-empty value. ownerLabel is used in the error message ("tool %q" or
+// "agent %q"); fields are referenced in declared order in the message.
+func requireExactlyOne(path, ownerLabel string, fields []namedField) error {
+	set := make([]string, 0, len(fields))
+	for _, f := range fields {
+		if f.value != "" {
+			set = append(set, f.name)
+		}
+	}
+	names := make([]string, 0, len(fields))
+	for _, f := range fields {
+		names = append(names, f.name)
+	}
+	switch len(set) {
+	case 0:
+		return fmt.Errorf("%s: %s: exactly one of %s is required", path, ownerLabel, strings.Join(names, ", "))
+	case 1:
+		return nil
+	default:
+		return fmt.Errorf("%s: %s: only one of %s may be set (got %s)", path, ownerLabel, strings.Join(names, ", "), strings.Join(set, ", "))
+	}
+}
+
+// checkMarkdownHTMLCollisions ensures no markdown param's auto-injected
+// "<name>_html" companion would shadow a user-declared param.
+func checkMarkdownHTMLCollisions(t *Tool, path string) error {
+	paramLower := make(map[string]struct{}, len(t.Params))
+	for name := range t.Params {
+		paramLower[strings.ToLower(name)] = struct{}{}
+	}
+	for name, p := range t.Params {
+		if p.Type != ParamMarkdown {
+			continue
+		}
+		collide := strings.ToLower(name) + "_html"
+		if _, exists := paramLower[collide]; exists {
+			return fmt.Errorf("%s: tool %q param %q (markdown): conflicting param %q would shadow the injected HTML companion", path, t.Name, name, collide)
+		}
+	}
+	return nil
+}
+
+// normalizeMCPList normalizes each MCP server and folds its name into
+// toolNames so agents can detect collisions later.
+func normalizeMCPList(b *Bot, toolNames map[string]struct{}, path string) error {
+	for i := range b.MCP {
+		m := &b.MCP[i]
+		err := normalizeMCPServer(m)
+		if err != nil {
+			return fmt.Errorf("%s: mcp[%d]: %w", path, i, err)
+		}
+		if _, clash := toolNames[m.Name]; clash {
+			return fmt.Errorf("%s: mcp %q conflicts with a tool of the same name", path, m.Name)
+		}
+		toolNames[m.Name] = struct{}{}
+	}
+	return nil
+}
+
+// normalizeCronList validates each cron entry and rejects duplicate names.
+func normalizeCronList(b *Bot, path string) error {
+	seen := make(map[string]struct{}, len(b.Cron))
 	for i := range b.Cron {
 		c := &b.Cron[i]
 		err := normalizeCron(c)
 		if err != nil {
-			return nil, fmt.Errorf("%s: cron[%d]: %w", path, i, err)
+			return fmt.Errorf("%s: cron[%d]: %w", path, i, err)
 		}
-		if _, dup := seenCronNames[c.Name]; dup {
-			return nil, fmt.Errorf("%s: cron[%d]: duplicate name %q", path, i, c.Name)
+		if _, dup := seen[c.Name]; dup {
+			return fmt.Errorf("%s: cron[%d]: duplicate name %q", path, i, c.Name)
 		}
-		seenCronNames[c.Name] = struct{}{}
+		seen[c.Name] = struct{}{}
 	}
+	return nil
+}
 
-	seenTestNames := make(map[string]struct{}, len(b.Tests))
+// normalizeTestList validates each test case (name, input, tool_calls, regex).
+func normalizeTestList(b *Bot, path string) error {
+	seen := make(map[string]struct{}, len(b.Tests))
 	for i := range b.Tests {
 		tc := &b.Tests[i]
 		tc.Name = strings.TrimSpace(tc.Name)
 		if tc.Name == "" {
-			return nil, fmt.Errorf("%s: tests[%d].name is required", path, i)
+			return fmt.Errorf("%s: tests[%d].name is required", path, i)
 		}
-		if _, dup := seenTestNames[tc.Name]; dup {
-			return nil, fmt.Errorf("%s: tests[%d]: duplicate name %q", path, i, tc.Name)
+		if _, dup := seen[tc.Name]; dup {
+			return fmt.Errorf("%s: tests[%d]: duplicate name %q", path, i, tc.Name)
 		}
-		seenTestNames[tc.Name] = struct{}{}
+		seen[tc.Name] = struct{}{}
 		if tc.Input == "" {
-			return nil, fmt.Errorf("%s: test %q: input is required", path, tc.Name)
+			return fmt.Errorf("%s: test %q: input is required", path, tc.Name)
 		}
 		for j, etc := range tc.Expect.ToolCalls {
 			etc.Name = strings.TrimSpace(etc.Name)
 			if etc.Name == "" {
-				return nil, fmt.Errorf("%s: test %q: expect.tool_calls[%d].name is required", path, tc.Name, j)
+				return fmt.Errorf("%s: test %q: expect.tool_calls[%d].name is required", path, tc.Name, j)
 			}
 			tc.Expect.ToolCalls[j] = etc
 		}
 		if om := tc.Expect.FinalOutput; om != nil && om.Regex != "" {
 			_, err := regexp.Compile(om.Regex)
 			if err != nil {
-				return nil, fmt.Errorf("%s: test %q: expect.final_output.regex: %w", path, tc.Name, err)
+				return fmt.Errorf("%s: test %q: expect.final_output.regex: %w", path, tc.Name, err)
 			}
 		}
 	}
+	return nil
+}
 
+// resolveAgents validates each agent reference (name, file/builtin
+// exclusivity, base-dir resolution) and recursively loads its child bot.
+func resolveAgents(b *Bot, toolNames map[string]struct{}, path, baseDir string, visited map[string]bool, depth int) error {
 	for key, ref := range b.Agents {
-		if !paramNameRe.MatchString(key) {
-			return nil, fmt.Errorf("%s: agent %q: name must match [A-Za-z_][A-Za-z0-9_]*", path, key)
-		}
-		if _, clash := toolNames[key]; clash {
-			return nil, fmt.Errorf("%s: agent %q conflicts with a tool or mcp server of the same name", path, key)
-		}
-		ref.File = strings.TrimSpace(ref.File)
-		ref.Builtin = strings.TrimSpace(ref.Builtin)
-		ref.Description = strings.TrimSpace(ref.Description)
-
-		set := []string{}
-		if ref.File != "" {
-			set = append(set, "file")
-		}
-		if ref.Builtin != "" {
-			set = append(set, "builtin")
-		}
-		switch len(set) {
-		case 0:
-			return nil, fmt.Errorf("%s: agent %q: exactly one of file, builtin is required", path, key)
-		case 1:
-		default:
-			return nil, fmt.Errorf("%s: agent %q: only one of file, builtin may be set (got %s)", path, key, strings.Join(set, ", "))
-		}
-
-		var (
-			child *Bot
-			err   error
-		)
-		if ref.File != "" {
-			childPath := ref.File
-			if !filepath.IsAbs(childPath) {
-				if baseDir == "" {
-					return nil, fmt.Errorf("%s: agent %q: relative file path %q cannot be resolved (built-in sub-agents have no base directory)", path, key, childPath)
-				}
-				childPath = filepath.Join(baseDir, childPath)
-			}
-			child, err = loadBot(childPath, nil, "", visited, depth+1)
-		} else {
-			builtinData, _, ok := LookupBuiltin(ref.Builtin)
-			if !ok {
-				return nil, fmt.Errorf("%s: agent %q: unknown builtin %q", path, key, ref.Builtin)
-			}
-			child, err = loadBot("builtin:"+ref.Builtin, builtinData, "", visited, depth+1)
-		}
+		child, err := resolveOneAgent(key, ref, toolNames, path, baseDir, visited, depth)
 		if err != nil {
-			return nil, fmt.Errorf("agent %q: %w", key, err)
+			return err
 		}
 		ref.Bot = child
 		b.Agents[key] = ref
 	}
+	return nil
+}
 
-	return &b, nil
+func resolveOneAgent(key string, ref AgentRef, toolNames map[string]struct{}, path, baseDir string, visited map[string]bool, depth int) (*Bot, error) {
+	if !paramNameRe.MatchString(key) {
+		return nil, fmt.Errorf("%s: agent %q: name must match [A-Za-z_][A-Za-z0-9_]*", path, key)
+	}
+	if _, clash := toolNames[key]; clash {
+		return nil, fmt.Errorf("%s: agent %q conflicts with a tool or mcp server of the same name", path, key)
+	}
+	ref.File = strings.TrimSpace(ref.File)
+	ref.Builtin = strings.TrimSpace(ref.Builtin)
+	ref.Description = strings.TrimSpace(ref.Description)
+	err := requireExactlyOne(path, fmt.Sprintf("agent %q", key), []namedField{
+		{"file", ref.File}, {"builtin", ref.Builtin},
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	if ref.File != "" {
+		childPath := ref.File
+		if !filepath.IsAbs(childPath) {
+			if baseDir == "" {
+				return nil, fmt.Errorf("%s: agent %q: relative file path %q cannot be resolved (built-in sub-agents have no base directory)", path, key, childPath)
+			}
+			childPath = filepath.Join(baseDir, childPath)
+		}
+		child, err := loadBot(childPath, nil, "", visited, depth+1)
+		if err != nil {
+			return nil, fmt.Errorf("agent %q: %w", key, err)
+		}
+		return child, nil
+	}
+
+	builtinData, _, ok := LookupBuiltin(ref.Builtin)
+	if !ok {
+		return nil, fmt.Errorf("%s: agent %q: unknown builtin %q", path, key, ref.Builtin)
+	}
+	child, err := loadBot("builtin:"+ref.Builtin, builtinData, "", visited, depth+1)
+	if err != nil {
+		return nil, fmt.Errorf("agent %q: %w", key, err)
+	}
+	return child, nil
 }
 
 // Walk invokes fn on b and every sub-agent reachable via b.Agents, in

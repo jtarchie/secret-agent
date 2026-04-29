@@ -104,9 +104,9 @@ func New(ctx context.Context, b *bot.Bot, llm adkmodel.LLM, opts ...Option) (*Ru
 		o(&cfg)
 	}
 
-	_ = ctx // reserved for future use; setup performs no I/O that needs cancellation
+	_ = ctx // setup performs no I/O; reserved so callers can pass theirs without contextcheck false positives
 	bld := &builder{recorder: cfg.recorder, resolver: cfg.resolver, senders: cfg.senders}
-	//nolint:contextcheck // buildAgent is pure wiring — no I/O to cancel, so ctx is intentionally not threaded through
+	//nolint:contextcheck // hook callbacks receive their own ctx from ADK at invocation; build-time wiring has no I/O
 	root, err := bld.buildAgent(b.Name, fmt.Sprintf("YAML-defined bot %q", b.Name), b, llm, true)
 	if err != nil {
 		return nil, err
@@ -148,48 +148,86 @@ type builder struct {
 // keys and descriptions drive what the parent LLM sees. isRoot is true only
 // for the top-level call so eval recorders fire once per turn at the outer
 // boundary rather than once per sub-agent level.
-//
-//nolint:cyclop,gocognit // sequential wiring of MCP toolsets, tools, sub-agents, hooks, and recorders reads clearly top-to-bottom
 func (bld *builder) buildAgent(name, description string, b *bot.Bot, llm adkmodel.LLM, isRoot bool) (agent.Agent, error) {
-	effective := llm
-	if bld.resolver != nil {
-		got, err := bld.resolver(b)
-		if err != nil {
-			return nil, fmt.Errorf("resolve model for %q: %w", b.Name, err)
-		}
-		if got != nil {
-			effective = got
-		}
+	effective, err := bld.resolveModel(b, llm)
+	if err != nil {
+		return nil, err
 	}
 
-	toolsets := make([]adktool.Toolset, 0, len(b.MCP))
+	toolsets, err := bld.buildToolsets(name, b)
+	if err != nil {
+		return nil, err
+	}
+
+	tools, err := bld.buildTools(b, effective, isRoot)
+	if err != nil {
+		return nil, err
+	}
+
+	cbs, err := bld.compileCallbacks(b, isRoot)
+	if err != nil {
+		return nil, err
+	}
+
+	built, err := llmagent.New(llmagent.Config{
+		Name:                 name,
+		Description:          description,
+		Model:                effective,
+		Instruction:          b.System,
+		Tools:                tools,
+		Toolsets:             toolsets,
+		BeforeModelCallbacks: cbs.BeforeModel,
+		AfterModelCallbacks:  cbs.AfterModel,
+		BeforeToolCallbacks:  cbs.BeforeTool,
+		AfterToolCallbacks:   cbs.AfterTool,
+		BeforeAgentCallbacks: cbs.BeforeAgent,
+		AfterAgentCallbacks:  cbs.AfterAgent,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("create agent %q: %w", name, err)
+	}
+	return built, nil
+}
+
+// resolveModel applies the per-bot model resolver if configured, falling
+// back to the inherited LLM from the parent.
+func (bld *builder) resolveModel(b *bot.Bot, inherited adkmodel.LLM) (adkmodel.LLM, error) {
+	if bld.resolver == nil {
+		return inherited, nil
+	}
+	got, err := bld.resolver(b)
+	if err != nil {
+		return nil, fmt.Errorf("resolve model for %q: %w", b.Name, err)
+	}
+	if got == nil {
+		return inherited, nil
+	}
+	return got, nil
+}
+
+// buildToolsets instantiates each declared MCP toolset and records a
+// preflight probe for it.
+func (bld *builder) buildToolsets(agentName string, b *bot.Bot) ([]adktool.Toolset, error) {
+	out := make([]adktool.Toolset, 0, len(b.MCP))
 	for _, m := range b.MCP {
 		ts, err := tool.NewMCP(m)
 		if err != nil {
 			return nil, fmt.Errorf("mcp %q: %w", m.Name, err)
 		}
-		toolsets = append(toolsets, ts)
-		bld.probes = append(bld.probes, mcpProbe{agent: name, server: m.Name, toolset: ts})
+		out = append(out, ts)
+		bld.probes = append(bld.probes, mcpProbe{agent: agentName, server: m.Name, toolset: ts})
 	}
+	return out, nil
+}
 
+// buildTools assembles user-declared tools (sh/expr/js), the optional
+// send_message tool at the root, and recursively-wrapped sub-agents.
+func (bld *builder) buildTools(b *bot.Bot, effective adkmodel.LLM, isRoot bool) ([]adktool.Tool, error) {
 	tools := make([]adktool.Tool, 0, len(b.Tools)+len(b.Agents))
 	for _, t := range b.Tools {
-		var (
-			built adktool.Tool
-			err   error
-		)
-		switch {
-		case t.Sh != "":
-			built, err = tool.NewShell(t.Name, t.Description, t.Sh, t.Params, t.Returns, bld.senders)
-		case t.Expr != "":
-			built, err = tool.NewExpr(t.Name, t.Description, t.Expr, t.Params)
-		case t.Js != "":
-			built, err = tool.NewJs(t.Name, t.Description, t.Js, t.Params)
-		default:
-			return nil, fmt.Errorf("tool %q: no runtime (sh/expr/js) set", t.Name)
-		}
+		built, err := bld.buildOneTool(t)
 		if err != nil {
-			return nil, fmt.Errorf("tool %q: %w", t.Name, err)
+			return nil, err
 		}
 		tools = append(tools, built)
 	}
@@ -217,15 +255,48 @@ func (bld *builder) buildAgent(name, description string, b *bot.Bot, llm adkmode
 		}
 		tools = append(tools, wrapped)
 	}
+	return tools, nil
+}
 
+func (bld *builder) buildOneTool(t bot.Tool) (adktool.Tool, error) {
+	switch {
+	case t.Sh != "":
+		built, err := tool.NewShell(t.Name, t.Description, t.Sh, t.Params, t.Returns, bld.senders)
+		if err != nil {
+			return nil, fmt.Errorf("tool %q: %w", t.Name, err)
+		}
+		return built, nil
+	case t.Expr != "":
+		built, err := tool.NewExpr(t.Name, t.Description, t.Expr, t.Params)
+		if err != nil {
+			return nil, fmt.Errorf("tool %q: %w", t.Name, err)
+		}
+		return built, nil
+	case t.Js != "":
+		built, err := tool.NewJs(t.Name, t.Description, t.Js, t.Params)
+		if err != nil {
+			return nil, fmt.Errorf("tool %q: %w", t.Name, err)
+		}
+		return built, nil
+	default:
+		return nil, fmt.Errorf("tool %q: no runtime (sh/expr/js) set", t.Name)
+	}
+}
+
+// compileCallbacks compiles bot-level hooks plus per-tool hooks (with
+// Filter set to the tool name) and folds them into LLMCallbacks. When
+// isRoot is true and a recorder is configured, a recorder-after-tool
+// callback is appended so eval traces fire once per turn at the outer
+// boundary.
+func (bld *builder) compileCallbacks(b *bot.Bot, isRoot bool) (hook.LLMCallbacks, error) {
 	compiled, err := hook.Compile(b.Hooks)
 	if err != nil {
-		return nil, fmt.Errorf("compile bot hooks: %w", err)
+		return hook.LLMCallbacks{}, fmt.Errorf("compile bot hooks: %w", err)
 	}
 	for _, t := range b.Tools {
 		th, err := hook.Compile(t.Hooks)
 		if err != nil {
-			return nil, fmt.Errorf("compile tool %q hooks: %w", t.Name, err)
+			return hook.LLMCallbacks{}, fmt.Errorf("compile tool %q hooks: %w", t.Name, err)
 		}
 		for i := range th {
 			th[i].Filter = t.Name
@@ -233,29 +304,10 @@ func (bld *builder) buildAgent(name, description string, b *bot.Bot, llm adkmode
 		compiled = append(compiled, th...)
 	}
 	cbs := hook.BuildLLMCallbacks(compiled)
-
 	if isRoot && bld.recorder != nil {
 		cbs.AfterTool = append(cbs.AfterTool, recorderAfterTool(bld.recorder))
 	}
-
-	built, err := llmagent.New(llmagent.Config{
-		Name:                 name,
-		Description:          description,
-		Model:                effective,
-		Instruction:          b.System,
-		Tools:                tools,
-		Toolsets:             toolsets,
-		BeforeModelCallbacks: cbs.BeforeModel,
-		AfterModelCallbacks:  cbs.AfterModel,
-		BeforeToolCallbacks:  cbs.BeforeTool,
-		AfterToolCallbacks:   cbs.AfterTool,
-		BeforeAgentCallbacks: cbs.BeforeAgent,
-		AfterAgentCallbacks:  cbs.AfterAgent,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("create agent %q: %w", name, err)
-	}
-	return built, nil
+	return cbs, nil
 }
 
 // PreflightMCP exercises every MCP toolset collected during buildAgent in
@@ -312,62 +364,74 @@ func (r *Runtime) PreflightMCP(ctx context.Context, timeout time.Duration) error
 // The underlying ADK session is created lazily (in-memory) on first use.
 // In stateless mode each turn gets its own session ID so no history
 // accumulates across turns.
-//
-//nolint:gocognit // the per-conv streaming handler keeps session setup, cancellation, and event pumping in one place
 func (r *Runtime) HandlerFor(convID string) func(context.Context, chat.Message) <-chan chat.Chunk {
 	return func(ctx context.Context, userMsg chat.Message) <-chan chat.Chunk {
 		out := make(chan chat.Chunk)
-
-		go func() {
-			defer close(out)
-
-			emit := func(c chat.Chunk) bool {
-				select {
-				case out <- c:
-					return true
-				case <-ctx.Done():
-					return false
-				}
-			}
-
-			sessionID := convID
-			if r.stateless {
-				sessionID = fmt.Sprintf("%s#t%d", convID, r.turnSeq.Add(1))
-			}
-
-			err := r.ensureSession(ctx, sessionID)
-			if err != nil {
-				emit(chat.Chunk{Err: err})
-				return
-			}
-
-			msg, err := buildUserContent(userMsg)
-			if err != nil {
-				emit(chat.Chunk{Err: err})
-				return
-			}
-			runCtx := tool.WithAttachments(ctx, userMsg.Attachments)
-			for ev, err := range r.runner.Run(runCtx, sessionID, sessionID, msg, agent.RunConfig{}) {
-				if err != nil {
-					emit(chat.Chunk{Err: err})
-					return
-				}
-				if ev.Content == nil {
-					continue
-				}
-				for _, p := range ev.Content.Parts {
-					if p.Text == "" {
-						continue
-					}
-					if !emit(chat.Chunk{Delta: p.Text}) {
-						return
-					}
-				}
-			}
-		}()
-
+		go r.runTurn(ctx, convID, userMsg, out)
 		return out
 	}
+}
+
+// runTurn streams one user turn through the ADK runner, emitting text
+// deltas as chat.Chunk on out. It closes out before returning. The first
+// error encountered (session setup, content build, or runner) is emitted
+// as a final Err chunk.
+func (r *Runtime) runTurn(ctx context.Context, convID string, userMsg chat.Message, out chan<- chat.Chunk) {
+	defer close(out)
+
+	emit := func(c chat.Chunk) bool {
+		select {
+		case out <- c:
+			return true
+		case <-ctx.Done():
+			return false
+		}
+	}
+
+	sessionID := convID
+	if r.stateless {
+		sessionID = fmt.Sprintf("%s#t%d", convID, r.turnSeq.Add(1))
+	}
+
+	err := r.ensureSession(ctx, sessionID)
+	if err != nil {
+		emit(chat.Chunk{Err: err})
+		return
+	}
+
+	msg, err := buildUserContent(userMsg)
+	if err != nil {
+		emit(chat.Chunk{Err: err})
+		return
+	}
+
+	runCtx := tool.WithAttachments(ctx, userMsg.Attachments)
+	for ev, err := range r.runner.Run(runCtx, sessionID, sessionID, msg, agent.RunConfig{}) {
+		if err != nil {
+			emit(chat.Chunk{Err: err})
+			return
+		}
+		if !emitTextParts(ev, emit) {
+			return
+		}
+	}
+}
+
+// emitTextParts pushes every non-empty text part of ev's content through
+// emit. Returns false if emit was canceled mid-stream.
+func emitTextParts(ev *session.Event, emit func(chat.Chunk) bool) bool {
+	if ev == nil || ev.Content == nil {
+		return true
+	}
+	for _, p := range ev.Content.Parts {
+		if p.Text == "" {
+			continue
+		}
+		if !emit(chat.Chunk{Delta: p.Text}) {
+			return false
+		}
+	}
+	return true
 }
 
 // buildUserContent composes a user-role genai.Content from a chat.Message by

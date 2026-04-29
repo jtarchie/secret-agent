@@ -54,28 +54,12 @@ type LinkConfig struct {
 // finishLink tries to .add() to an immutable list in the jsonRpc
 // dispatcher and fails after the account is saved. The `link` subcommand
 // avoids that dispatcher entirely.
-//
-//nolint:gocognit,cyclop // linear spawn → stdout scan → wait → fallback flow reads clearly top-to-bottom
 func Link(ctx context.Context, cfg LinkConfig) (string, error) {
-	if cfg.StateDir == "" {
-		return "", errors.New("StateDir is required")
-	}
-	if cfg.Command == "" {
-		cfg.Command = "signal-cli"
-	}
-	if cfg.DeviceName == "" {
-		cfg.DeviceName = "secret-agent"
-	}
-	if cfg.Logger == nil {
-		cfg.Logger = slog.New(slog.NewTextHandler(os.Stderr, nil))
+	err := cfg.applyDefaults()
+	if err != nil {
+		return "", err
 	}
 	log := cfg.Logger.With("component", "signal-link")
-	if cfg.URIOut == nil {
-		cfg.URIOut = os.Stdout
-	}
-	if cfg.QRCodeOut == nil {
-		cfg.QRCodeOut = cfg.URIOut
-	}
 
 	cmd := exec.CommandContext(ctx, cfg.Command, "--config", cfg.StateDir, "link", "-n", cfg.DeviceName)
 	cmd.Cancel = func() error { return cmd.Process.Signal(os.Interrupt) }
@@ -100,58 +84,8 @@ func Link(ctx context.Context, cfg LinkConfig) (string, error) {
 		return "", fmt.Errorf("start %s: %w", cfg.Command, err)
 	}
 
-	go func() {
-		scanner := bufio.NewScanner(stderr)
-		scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-		for scanner.Scan() {
-			line := strings.TrimRight(scanner.Text(), "\r\n")
-			if line == "" {
-				continue
-			}
-			if m := signalCliLogRe.FindStringSubmatch(line); m != nil {
-				log.Log(ctx, parseLogLevel(m[1]), "signal-cli", "class", m[2], "msg", m[3])
-				continue
-			}
-			log.Info("signal-cli", "raw", line)
-		}
-	}()
-
-	// signal-cli link's stdout is typically two lines:
-	//   sgnl://linkdevice?uuid=...&pub_key=...
-	//   Associated with: +15551234567
-	// We print+QR the first, then capture the phone number from subsequent lines.
-	var number string
-	numberRe := regexp.MustCompile(`(\+\d{6,15})`)
-	scanner := bufio.NewScanner(stdout)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-	for scanner.Scan() {
-		line := strings.TrimRight(scanner.Text(), "\r\n")
-		if line == "" {
-			continue
-		}
-		if strings.HasPrefix(line, "sgnl://") {
-			log.Info("received linking URI", "uri_bytes", len(line))
-			_, _ = fmt.Fprintln(cfg.URIOut, line)
-			if !cfg.NoQRCode {
-				qrterminal.GenerateWithConfig(line, qrterminal.Config{
-					Level:          qrterminal.L,
-					Writer:         cfg.QRCodeOut,
-					HalfBlocks:     true,
-					BlackChar:      qrterminal.BLACK_BLACK,
-					WhiteChar:      qrterminal.WHITE_WHITE,
-					WhiteBlackChar: qrterminal.WHITE_BLACK,
-					BlackWhiteChar: qrterminal.BLACK_WHITE,
-					QuietZone:      1,
-				})
-			}
-			log.Info("waiting for primary device to confirm")
-			continue
-		}
-		log.Info("signal-cli", "raw", line)
-		if m := numberRe.FindString(line); m != "" && number == "" {
-			number = m
-		}
-	}
+	go pumpStderr(ctx, log, stderr)
+	number := scanStdoutForNumber(log, &cfg, stdout)
 
 	err = cmd.Wait()
 	if err != nil {
@@ -168,6 +102,94 @@ func Link(ctx context.Context, cfg LinkConfig) (string, error) {
 	}
 	log.Info("link complete", "number", number)
 	return number, nil
+}
+
+// applyDefaults validates StateDir and fills in zero-valued config fields.
+func (cfg *LinkConfig) applyDefaults() error {
+	if cfg.StateDir == "" {
+		return errors.New("StateDir is required")
+	}
+	if cfg.Command == "" {
+		cfg.Command = "signal-cli"
+	}
+	if cfg.DeviceName == "" {
+		cfg.DeviceName = "secret-agent"
+	}
+	if cfg.Logger == nil {
+		cfg.Logger = slog.New(slog.NewTextHandler(os.Stderr, nil))
+	}
+	if cfg.URIOut == nil {
+		cfg.URIOut = os.Stdout
+	}
+	if cfg.QRCodeOut == nil {
+		cfg.QRCodeOut = cfg.URIOut
+	}
+	return nil
+}
+
+// pumpStderr reads signal-cli's stderr line-by-line and forwards each line
+// to log, parsing structured signal-cli log lines into level/class/msg keys
+// and falling back to a raw passthrough for unrecognized output.
+func pumpStderr(ctx context.Context, log *slog.Logger, stderr io.Reader) {
+	scanner := bufio.NewScanner(stderr)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for scanner.Scan() {
+		line := strings.TrimRight(scanner.Text(), "\r\n")
+		if line == "" {
+			continue
+		}
+		if m := signalCliLogRe.FindStringSubmatch(line); m != nil {
+			log.Log(ctx, parseLogLevel(m[1]), "signal-cli", "class", m[2], "msg", m[3])
+			continue
+		}
+		log.Info("signal-cli", "raw", line)
+	}
+}
+
+// scanStdoutForNumber consumes signal-cli's stdout. When a `sgnl://...`
+// URI appears it is rendered (and printed); when an "Associated with: +123"
+// line appears the E.164 number is captured. Returns the captured number
+// (empty if signal-cli did not print one before exiting).
+func scanStdoutForNumber(log *slog.Logger, cfg *LinkConfig, stdout io.Reader) string {
+	var number string
+	numberRe := regexp.MustCompile(`(\+\d{6,15})`)
+	scanner := bufio.NewScanner(stdout)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for scanner.Scan() {
+		line := strings.TrimRight(scanner.Text(), "\r\n")
+		if line == "" {
+			continue
+		}
+		if strings.HasPrefix(line, "sgnl://") {
+			renderLinkURI(log, cfg, line)
+			continue
+		}
+		log.Info("signal-cli", "raw", line)
+		if m := numberRe.FindString(line); m != "" && number == "" {
+			number = m
+		}
+	}
+	return number
+}
+
+// renderLinkURI prints the sgnl:// URI to URIOut and (unless disabled)
+// renders a QR code to QRCodeOut.
+func renderLinkURI(log *slog.Logger, cfg *LinkConfig, uri string) {
+	log.Info("received linking URI", "uri_bytes", len(uri))
+	_, _ = fmt.Fprintln(cfg.URIOut, uri)
+	if !cfg.NoQRCode {
+		qrterminal.GenerateWithConfig(uri, qrterminal.Config{
+			Level:          qrterminal.L,
+			Writer:         cfg.QRCodeOut,
+			HalfBlocks:     true,
+			BlackChar:      qrterminal.BLACK_BLACK,
+			WhiteChar:      qrterminal.WHITE_WHITE,
+			WhiteBlackChar: qrterminal.WHITE_BLACK,
+			BlackWhiteChar: qrterminal.BLACK_WHITE,
+			QuietZone:      1,
+		})
+	}
+	log.Info("waiting for primary device to confirm")
 }
 
 // readLatestAccount returns the number from the last entry in

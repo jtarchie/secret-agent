@@ -66,16 +66,16 @@ func beforeTool(h Compiled) llmagent.BeforeToolCallback {
 			"tool_name": t.Name(),
 			"args":      cloneArgs(args),
 		}
-		out, err := h.Run(tctx, env)
+		res, err := h.Run(tctx, env)
 		if err != nil {
 			return nil, fmt.Errorf("before_tool %q: %w", t.Name(), err)
 		}
-		if out == nil {
+		if !res.HasValue {
 			return nil, nil
 		}
-		m, ok := out.(map[string]any)
+		m, ok := res.Value.(map[string]any)
 		if !ok {
-			return map[string]any{"output": out}, nil
+			return map[string]any{"output": res.Value}, nil
 		}
 		return m, nil
 	}
@@ -95,16 +95,16 @@ func afterTool(h Compiled) llmagent.AfterToolCallback {
 			"result":    cloneArgs(result),
 			"error":     errString(inErr),
 		}
-		out, err := h.Run(tctx, env)
+		res, err := h.Run(tctx, env)
 		if err != nil {
 			return nil, fmt.Errorf("after_tool %q: %w", t.Name(), err)
 		}
-		if out == nil {
+		if !res.HasValue {
 			return nil, nil
 		}
-		m, ok := out.(map[string]any)
+		m, ok := res.Value.(map[string]any)
 		if !ok {
-			return map[string]any{"output": out}, nil
+			return map[string]any{"output": res.Value}, nil
 		}
 		return m, nil
 	}
@@ -136,14 +136,14 @@ func afterModel(h Compiled) llmagent.AfterModelCallback {
 			"response": responseToAny(resp),
 			"error":    errString(inErr),
 		}
-		out, err := h.Run(cctx, env)
+		res, err := h.Run(cctx, env)
 		if err != nil {
 			return nil, fmt.Errorf("after_model: %w", err)
 		}
-		if out == nil {
+		if !res.HasValue {
 			return nil, nil
 		}
-		text, ok := textFromAny(out)
+		text, ok := textFromAny(res.Value)
 		if !ok {
 			// Non-string, non-{text:...} values are ignored for now — keep
 			// the response substitution narrow and well-typed.
@@ -160,11 +160,14 @@ func afterModel(h Compiled) llmagent.AfterModelCallback {
 func beforeAgent(h Compiled) agent.BeforeAgentCallback {
 	return func(cctx agent.CallbackContext) (*genai.Content, error) {
 		env := agentEnv(cctx)
-		out, err := h.Run(cctx, env)
+		res, err := h.Run(cctx, env)
 		if err != nil {
 			return nil, fmt.Errorf("before_agent: %w", err)
 		}
-		return contentFromAny(out), nil
+		if !res.HasValue {
+			return nil, nil
+		}
+		return contentFromAny(res.Value), nil
 	}
 }
 
@@ -173,11 +176,14 @@ func beforeAgent(h Compiled) agent.BeforeAgentCallback {
 func afterAgent(h Compiled) agent.AfterAgentCallback {
 	return func(cctx agent.CallbackContext) (*genai.Content, error) {
 		env := agentEnv(cctx)
-		out, err := h.Run(cctx, env)
+		res, err := h.Run(cctx, env)
 		if err != nil {
 			return nil, fmt.Errorf("after_agent: %w", err)
 		}
-		return contentFromAny(out), nil
+		if !res.HasValue {
+			return nil, nil
+		}
+		return contentFromAny(res.Value), nil
 	}
 }
 

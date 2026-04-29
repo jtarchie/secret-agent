@@ -1,6 +1,7 @@
 package tool
 
 import (
+	"errors"
 	"fmt"
 	"strconv"
 
@@ -12,7 +13,7 @@ import (
 // for an integer). Shared by the expr and js runtimes so both see typed
 // bindings rather than the stringified forms shell uses.
 func coerceRuntimeValue(v any, t bot.ParamType) (any, error) {
-	switch t { //nolint:exhaustive // ParamAttachment is resolved before reaching this helper
+	switch t {
 	case bot.ParamString, bot.ParamMarkdown:
 		return coerceRuntimeString(v), nil
 	case bot.ParamInteger:
@@ -21,6 +22,8 @@ func coerceRuntimeValue(v any, t bot.ParamType) (any, error) {
 		return coerceRuntimeNumber(v)
 	case bot.ParamBoolean:
 		return coerceRuntimeBoolean(v)
+	case bot.ParamAttachment:
+		return nil, errors.New("attachment param reached runtime coercion (should be resolved earlier)")
 	}
 	return nil, fmt.Errorf("unknown param type %q", t)
 }

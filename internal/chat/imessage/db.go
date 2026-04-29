@@ -61,7 +61,6 @@ type row struct {
 // runSQLite executes one query against the chat.db and parses the JSON
 // array of rows sqlite3 emits with the -json flag.
 func runSQLite(ctx context.Context, binary, dbPath, query string, dst any) error {
-	//nolint:gosec // inputs are internal (fixed binary name + literal queries); no user-provided SQL.
 	cmd := exec.CommandContext(ctx, binary, "-json", "-readonly", dbPath, query)
 	out, err := cmd.Output()
 	if err != nil {

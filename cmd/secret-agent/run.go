@@ -35,7 +35,6 @@ type RunCmd struct {
 	Verbose             int           `help:"verbosity: 0 info, 1 debug + signal-cli -v, 2 debug + signal-cli -vv, 3 debug + signal-cli -vvv"`
 }
 
-//nolint:cyclop,gocognit // the config-load → bot-wire → transport-wire flow is sequential and clearer as one function
 func (c *RunCmd) Run() error {
 	cfg, err := config.Load(c.Config)
 	if err != nil {
@@ -53,55 +52,20 @@ func (c *RunCmd) Run() error {
 
 	logger := newLogger(c.Verbose)
 
-	configDir := filepath.Dir(c.Config)
-	topBots := make([]*bot.Bot, 0, len(cfg.Bots))
-	for _, p := range cfg.Bots {
-		if !filepath.IsAbs(p) {
-			p = filepath.Join(configDir, p)
-		}
-		b, err := bot.Load(p)
-		if err != nil {
-			return fmt.Errorf("load bot %s: %w", p, err)
-		}
-		topBots = append(topBots, b)
+	topBots, err := loadTopBots(cfg.Bots, filepath.Dir(c.Config))
+	if err != nil {
+		return err
 	}
 
-	// Resolve an LLM per bot (top-level + every sub-agent) with per-bot
-	// overrides falling back to the global flags. Memoize by bot pointer so
-	// the preflight walk and the runtime resolver share one resolution.
-	type endpoint struct{ provider, apiKey, baseURL string }
-	llmCache := map[*bot.Bot]adkmodel.LLM{}
-	endpoints := map[endpoint]struct{}{}
-	for _, b := range topBots {
-		var walkErr error
-		bot.Walk(b, func(bb *bot.Bot) {
-			if walkErr != nil {
-				return
-			}
-			if _, ok := llmCache[bb]; ok {
-				return
-			}
-			botLLM, prov, key, base, err := model.ResolveForBot(bb, llm, provider, name, c.APIKey, c.BaseURL)
-			if err != nil {
-				walkErr = err
-				return
-			}
-			llmCache[bb] = botLLM
-			endpoints[endpoint{prov, key, base}] = struct{}{}
-		})
-		if walkErr != nil {
-			return fmt.Errorf("resolve model: %w", walkErr)
-		}
+	llmCache, endpoints, err := resolveBotLLMs(topBots, llm, provider, name, c.APIKey, c.BaseURL)
+	if err != nil {
+		return err
 	}
 
 	if !c.SkipPreflight {
-		for ep := range endpoints {
-			preflightCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-			err := model.Preflight(preflightCtx, ep.provider, ep.apiKey, ep.baseURL)
-			cancel()
-			if err != nil {
-				return fmt.Errorf("model preflight failed (use --skip-preflight to bypass): %w", err)
-			}
+		err := preflightEndpoints(ctx, endpoints)
+		if err != nil {
+			return err
 		}
 	}
 
@@ -119,30 +83,9 @@ func (c *RunCmd) Run() error {
 	senders := buildSenderRegistry(cfg, transports)
 
 	scheduler := cronpkg.New(logger, senders)
-	routes := make([]router.Route, 0, len(topBots))
-	for _, b := range topBots {
-		rt, err := runtime.New(ctx, b, llm,
-			runtime.WithModelResolver(resolver),
-			runtime.WithSenderRegistry(senders),
-		)
-		if err != nil {
-			return fmt.Errorf("runtime for bot %q: %w", b.Name, err)
-		}
-		if !c.SkipPreflight {
-			err := rt.PreflightMCP(ctx, c.MCPPreflightTimeout)
-			if err != nil {
-				return fmt.Errorf("mcp preflight failed for bot %q (use --skip-preflight to bypass): %w", b.Name, err)
-			}
-		}
-		route, err := router.RouteFromBot(b, rt.HandlerFor)
-		if err != nil {
-			return fmt.Errorf("route bot %q: %w", b.Name, err)
-		}
-		routes = append(routes, route)
-		err = scheduler.Register(b, rt)
-		if err != nil {
-			return fmt.Errorf("register cron for bot %q: %w", b.Name, err)
-		}
+	routes, err := buildRoutes(ctx, topBots, llm, resolver, senders, scheduler, c.SkipPreflight, c.MCPPreflightTimeout)
+	if err != nil {
+		return err
 	}
 
 	rtr, err := router.New(routes, router.WithLogger(logger))
@@ -163,6 +106,113 @@ func (c *RunCmd) Run() error {
 		return fmt.Errorf("transports: %w", err)
 	}
 	return nil
+}
+
+// loadTopBots loads each bot YAML named in the config, resolving relative
+// paths against configDir.
+func loadTopBots(paths []string, configDir string) ([]*bot.Bot, error) {
+	out := make([]*bot.Bot, 0, len(paths))
+	for _, p := range paths {
+		if !filepath.IsAbs(p) {
+			p = filepath.Join(configDir, p)
+		}
+		b, err := bot.Load(p)
+		if err != nil {
+			return nil, fmt.Errorf("load bot %s: %w", p, err)
+		}
+		out = append(out, b)
+	}
+	return out, nil
+}
+
+type modelEndpoint struct{ provider, apiKey, baseURL string }
+
+// resolveBotLLMs walks every bot in the tree and resolves an LLM per bot,
+// memoized by bot pointer. Returns the cache and the unique set of
+// (provider, key, base) tuples observed for preflight.
+func resolveBotLLMs(
+	topBots []*bot.Bot,
+	defaultLLM adkmodel.LLM,
+	provider, name, apiKey, baseURL string,
+) (map[*bot.Bot]adkmodel.LLM, map[modelEndpoint]struct{}, error) {
+	llmCache := map[*bot.Bot]adkmodel.LLM{}
+	endpoints := map[modelEndpoint]struct{}{}
+	for _, b := range topBots {
+		var walkErr error
+		bot.Walk(b, func(bb *bot.Bot) {
+			if walkErr != nil {
+				return
+			}
+			if _, ok := llmCache[bb]; ok {
+				return
+			}
+			botLLM, prov, key, base, err := model.ResolveForBot(bb, defaultLLM, provider, name, apiKey, baseURL)
+			if err != nil {
+				walkErr = err
+				return
+			}
+			llmCache[bb] = botLLM
+			endpoints[modelEndpoint{prov, key, base}] = struct{}{}
+		})
+		if walkErr != nil {
+			return nil, nil, fmt.Errorf("resolve model: %w", walkErr)
+		}
+	}
+	return llmCache, endpoints, nil
+}
+
+// preflightEndpoints runs the model preflight against each unique endpoint.
+func preflightEndpoints(ctx context.Context, endpoints map[modelEndpoint]struct{}) error {
+	for ep := range endpoints {
+		preflightCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		err := model.Preflight(preflightCtx, ep.provider, ep.apiKey, ep.baseURL)
+		cancel()
+		if err != nil {
+			return fmt.Errorf("model preflight failed (use --skip-preflight to bypass): %w", err)
+		}
+	}
+	return nil
+}
+
+// buildRoutes constructs a runtime + router.Route per bot, registers each
+// runtime with the scheduler, and runs MCP preflight unless skipped.
+func buildRoutes(
+	ctx context.Context,
+	topBots []*bot.Bot,
+	llm adkmodel.LLM,
+	resolver runtime.ModelResolver,
+	senders chat.SenderRegistry,
+	scheduler *cronpkg.Scheduler,
+	skipPreflight bool,
+	mcpPreflightTimeout time.Duration,
+) ([]router.Route, error) {
+	routes := make([]router.Route, 0, len(topBots))
+	for _, b := range topBots {
+		rt, err := runtime.New(ctx, b, llm,
+			runtime.WithModelResolver(resolver),
+			runtime.WithSenderRegistry(senders),
+		)
+		if err != nil {
+			return nil, fmt.Errorf("runtime for bot %q: %w", b.Name, err)
+		}
+		if !skipPreflight {
+			err := rt.PreflightMCP(ctx, mcpPreflightTimeout)
+			if err != nil {
+				return nil, fmt.Errorf("mcp preflight failed for bot %q (use --skip-preflight to bypass): %w", b.Name, err)
+			}
+		}
+		route, err := router.RouteFromBot(b, rt.HandlerFor)
+		if err != nil {
+			return nil, fmt.Errorf("route bot %q: %w", b.Name, err)
+		}
+		routes = append(routes, route)
+		//nolint:contextcheck // cron jobs create their own context.Background() at fire time; registration ctx would be long-canceled
+		err = scheduler.Register(b, rt)
+		if err != nil {
+			return nil, fmt.Errorf("register cron for bot %q: %w", b.Name, err)
+		}
+	}
+	return routes, nil
 }
 
 // buildSenderRegistry walks the configured transports and maps each

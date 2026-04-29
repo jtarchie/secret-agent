@@ -48,3 +48,6 @@ linters:
       min-complexity: 30
     nestif:
       min-complexity: 7
+    exhaustive:
+      # A `default:` branch is a perfectly fine catch-all for the linter's purposes.
+      default-signifies-exhaustive: true

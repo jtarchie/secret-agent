@@ -52,7 +52,6 @@ func sendGroup(ctx context.Context, binary, chatGUID, body string) error {
 // require AppleScript-level escaping.
 func runOsascript(ctx context.Context, binary, script string, args ...string) error {
 	full := append([]string{"-"}, args...)
-	//nolint:gosec // binary is a fixed config value, args are the bot reply body and sender handle.
 	cmd := exec.CommandContext(ctx, binary, full...)
 	cmd.Stdin = strings.NewReader(script)
 	out, err := cmd.CombinedOutput()

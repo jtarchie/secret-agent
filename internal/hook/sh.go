@@ -19,18 +19,18 @@ import (
 // strings; complex values JSON-encoded) and interprets the script. Stdout
 // is parsed as JSON if non-empty; empty stdout yields pass-through (nil).
 // A non-zero exit yields an error carrying stderr.
-func compileSh(script string) (func(context.Context, map[string]any) (any, error), error) {
+func compileSh(script string) (func(context.Context, map[string]any) (Result, error), error) {
 	file, err := syntax.NewParser().Parse(strings.NewReader(script), "hook")
 	if err != nil {
 		return nil, fmt.Errorf("parse sh: %w", err)
 	}
 
-	return func(ctx context.Context, env map[string]any) (any, error) {
+	return func(ctx context.Context, env map[string]any) (Result, error) {
 		vars := os.Environ()
 		for k, v := range env {
 			s, err := toEnvValue(v)
 			if err != nil {
-				return nil, fmt.Errorf("env %q: %w", k, err)
+				return PassThrough, fmt.Errorf("env %q: %w", k, err)
 			}
 			vars = append(vars, strings.ToUpper(k)+"="+s)
 		}
@@ -41,28 +41,28 @@ func compileSh(script string) (func(context.Context, map[string]any) (any, error
 			interp.StdIO(nil, &stdout, &stderr),
 		)
 		if err != nil {
-			return nil, fmt.Errorf("new shell runner: %w", err)
+			return PassThrough, fmt.Errorf("new shell runner: %w", err)
 		}
 		err = runner.Run(ctx, file)
 		if err != nil {
 			msg := strings.TrimSpace(stderr.String())
 			if msg != "" {
-				return nil, fmt.Errorf("%w: %s", err, msg)
+				return PassThrough, fmt.Errorf("%w: %s", err, msg)
 			}
-			return nil, fmt.Errorf("shell run: %w", err)
+			return PassThrough, fmt.Errorf("shell run: %w", err)
 		}
 
 		out := strings.TrimSpace(stdout.String())
 		if out == "" {
-			return nil, nil //nolint:nilnil // (nil, nil) is the pass-through signal
+			return PassThrough, nil
 		}
 		var decoded any
 		err = json.Unmarshal([]byte(out), &decoded)
 		if err != nil {
 			// Stdout is non-JSON; treat it as a scalar string result.
-			return out, nil
+			return NewValue(out), nil
 		}
-		return decoded, nil
+		return NewValue(decoded), nil
 	}, nil
 }
 

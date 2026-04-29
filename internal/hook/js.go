@@ -14,18 +14,18 @@ import (
 //
 // Execution is interrupted when ctx is cancelled, mirroring the tool/js
 // behavior.
-func compileJs(code string) (func(context.Context, map[string]any) (any, error), error) {
+func compileJs(code string) (func(context.Context, map[string]any) (Result, error), error) {
 	program, err := goja.Compile("hook", code, true)
 	if err != nil {
 		return nil, fmt.Errorf("compile js: %w", err)
 	}
 
-	return func(ctx context.Context, env map[string]any) (any, error) {
+	return func(ctx context.Context, env map[string]any) (Result, error) {
 		vm := goja.New()
 		for k, v := range env {
 			err := vm.Set(k, v)
 			if err != nil {
-				return nil, fmt.Errorf("bind %q: %w", k, err)
+				return PassThrough, fmt.Errorf("bind %q: %w", k, err)
 			}
 		}
 
@@ -41,11 +41,11 @@ func compileJs(code string) (func(context.Context, map[string]any) (any, error),
 
 		val, err := vm.RunProgram(program)
 		if err != nil {
-			return nil, fmt.Errorf("run js: %w", err)
+			return PassThrough, fmt.Errorf("run js: %w", err)
 		}
 		if val == nil || goja.IsUndefined(val) || goja.IsNull(val) {
-			return nil, nil //nolint:nilnil // (nil, nil) is the pass-through signal
+			return PassThrough, nil
 		}
-		return val.Export(), nil
+		return NewValue(val.Export()), nil
 	}, nil
 }

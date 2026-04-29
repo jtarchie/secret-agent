@@ -72,7 +72,7 @@ func loadBuiltins() {
 			return
 		}
 		bytes[hdr.Name] = data
-		list = append(list, BuiltinInfo{Name: hdr.Name, Description: hdr.Description})
+		list = append(list, BuiltinInfo(hdr))
 	}
 
 	sort.Slice(list, func(i, j int) bool { return list[i].Name < list[j].Name })

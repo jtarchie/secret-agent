@@ -22,11 +22,14 @@ func compileOrFail(t *testing.T, h bot.Hook) Compiled {
 
 func runOrFail(t *testing.T, c Compiled, env map[string]any) any {
 	t.Helper()
-	out, err := c.Run(context.Background(), env)
+	res, err := c.Run(context.Background(), env)
 	if err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	return out
+	if !res.HasValue {
+		return nil
+	}
+	return res.Value
 }
 
 // --- expr runtime -------------------------------------------------------
