@@ -217,6 +217,59 @@ func TestMessageFromAppMentionInfersDMChannelType(t *testing.T) {
 	}
 }
 
+func TestFormatThreadHistoryEmpty(t *testing.T) {
+	if got := formatThreadHistory(nil, "999.000", "UBOT"); got != "" {
+		t.Errorf("nil msgs: got %q, want empty", got)
+	}
+	// Only-current-message → empty.
+	msgs := []slackgo.Message{{Msg: slackgo.Msg{Timestamp: "999.000", User: "U1", Text: "hi"}}}
+	if got := formatThreadHistory(msgs, "999.000", "UBOT"); got != "" {
+		t.Errorf("only current: got %q, want empty", got)
+	}
+}
+
+func TestFormatThreadHistoryLabelsBotAndUsers(t *testing.T) {
+	msgs := []slackgo.Message{
+		{Msg: slackgo.Msg{Timestamp: "100.000", User: "U1", Text: "  thread parent  "}},
+		{Msg: slackgo.Msg{Timestamp: "100.111", User: "U2", Text: "second user msg"}},
+		{Msg: slackgo.Msg{Timestamp: "100.222", User: "UBOT", BotID: "B1", Text: "bot reply"}},
+		{Msg: slackgo.Msg{Timestamp: "999.000", User: "U1", Text: "current — should be skipped"}},
+	}
+	got := formatThreadHistory(msgs, "999.000", "UBOT")
+	want := "<thread_history>\nU1: thread parent\nU2: second user msg\nassistant: bot reply\n</thread_history>\n\n"
+	if got != want {
+		t.Errorf("formatThreadHistory mismatch:\n got=%q\nwant=%q", got, want)
+	}
+}
+
+func TestFormatThreadHistorySkipsNoiseSubtypes(t *testing.T) {
+	msgs := []slackgo.Message{
+		{Msg: slackgo.Msg{Timestamp: "100.000", User: "U1", Text: "kept"}},
+		{Msg: slackgo.Msg{Timestamp: "100.111", User: "U1", Text: "edited", SubType: "message_changed"}},
+		{Msg: slackgo.Msg{Timestamp: "100.222", User: "U1", Text: "", SubType: "channel_join"}},
+		{Msg: slackgo.Msg{Timestamp: "100.333", User: "U1", Text: "with file", SubType: "file_share"}},
+	}
+	got := formatThreadHistory(msgs, "999.000", "UBOT")
+	want := "<thread_history>\nU1: kept\nU1: with file\n</thread_history>\n\n"
+	if got != want {
+		t.Errorf("formatThreadHistory mismatch:\n got=%q\nwant=%q", got, want)
+	}
+}
+
+func TestFormatThreadHistoryLabelsBotByUserID(t *testing.T) {
+	// chat.postMessage from the bot sets m.User to the bot user id (no BotID
+	// when posted through the bot token in some shapes); verify that path.
+	msgs := []slackgo.Message{
+		{Msg: slackgo.Msg{Timestamp: "100.000", User: "UBOT", Text: "earlier bot turn"}},
+		{Msg: slackgo.Msg{Timestamp: "100.111", User: "U1", Text: "human reply"}},
+	}
+	got := formatThreadHistory(msgs, "999.000", "UBOT")
+	want := "<thread_history>\nassistant: earlier bot turn\nU1: human reply\n</thread_history>\n\n"
+	if got != want {
+		t.Errorf("formatThreadHistory mismatch:\n got=%q\nwant=%q", got, want)
+	}
+}
+
 func TestEventCacheDedups(t *testing.T) {
 	c := newEventCache(time.Minute)
 	if c.seen("C1:111.222") {

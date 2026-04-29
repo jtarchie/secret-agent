@@ -181,6 +181,54 @@ func messageFromAppMention(ev *slackevents.AppMentionEvent) *slackevents.Message
 	return msg
 }
 
+// formatThreadHistory turns Slack thread replies into a <thread_history>
+// block prepended to the current message so the model has context for
+// @-mentions in threads it wasn't previously part of. The current message
+// (currentTS) is excluded so it isn't duplicated. Bot-authored messages —
+// matched by BotID or by botUserID on the User field — are labeled
+// "assistant" so the model can distinguish its prior turns from human ones.
+// Returns "" if no usable prior messages remain.
+func formatThreadHistory(msgs []slackgo.Message, currentTS, botUserID string) string {
+	var sb strings.Builder
+	wrote := false
+	for _, m := range msgs {
+		if m.Timestamp == currentTS {
+			continue
+		}
+		// Skip edits/deletions/joins/leaves; keep plain text and bot_message.
+		switch m.SubType {
+		case "", "bot_message", "thread_broadcast", "file_share":
+			// keep
+		default:
+			continue
+		}
+		text := strings.TrimSpace(m.Text)
+		if text == "" {
+			continue
+		}
+		speaker := m.User
+		if m.BotID != "" || (botUserID != "" && m.User == botUserID) {
+			speaker = "assistant"
+		}
+		if speaker == "" {
+			speaker = "unknown"
+		}
+		if !wrote {
+			sb.WriteString("<thread_history>\n")
+			wrote = true
+		}
+		sb.WriteString(speaker)
+		sb.WriteString(": ")
+		sb.WriteString(text)
+		sb.WriteString("\n")
+	}
+	if !wrote {
+		return ""
+	}
+	sb.WriteString("</thread_history>\n\n")
+	return sb.String()
+}
+
 // eventCache deduplicates events keyed by channel+timestamp. Slack
 // delivers both a MessageEvent and an AppMentionEvent for the same
 // physical @-mention when the bot is in a channel and subscribed to

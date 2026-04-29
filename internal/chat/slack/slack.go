@@ -37,6 +37,10 @@ type Transport struct {
 	// fileDownloadTimeout bounds each attachment download. Slack file URLs
 	// are small by default (~a few MB); 60s is a generous ceiling.
 	fileDownloadTimeout time.Duration
+	// threadHistoryLimit caps how many prior thread messages we fetch when
+	// the bot is mentioned in an existing thread. Slack threads can be huge,
+	// and the prompt gets prepended to the user turn, so we keep this bounded.
+	threadHistoryLimit int
 
 	// senderMu guards senderAPI. Populated while Run is active so Send can
 	// post messages on the same authenticated client.
@@ -71,6 +75,7 @@ func New(botToken, appToken string, opts ...Option) *Transport {
 		appToken:            appToken,
 		httpClient:          &http.Client{Timeout: 60 * time.Second},
 		fileDownloadTimeout: 60 * time.Second,
+		threadHistoryLimit:  50,
 	}
 	for _, opt := range opts {
 		opt(t)
@@ -120,7 +125,8 @@ func (t *Transport) Run(ctx context.Context, dispatcher chat.Dispatcher) error {
 		return fmt.Errorf("slack auth.test: %w", err)
 	}
 	botID := auth.BotID
-	log = log.With("bot_id", botID, "user_id", auth.UserID, "team", auth.Team)
+	botUserID := auth.UserID
+	log = log.With("bot_id", botID, "user_id", botUserID, "team", auth.Team)
 	log.Info("slack authenticated")
 
 	// Per-channel send serialization so multi-chunk replies from one
@@ -159,7 +165,7 @@ func (t *Transport) Run(ctx context.Context, dispatcher chat.Dispatcher) error {
 		}
 
 		start := time.Now()
-		runErr := t.runOnce(ctx, log, api, dispatcher, lockFor, seen, botID)
+		runErr := t.runOnce(ctx, log, api, dispatcher, lockFor, seen, botID, botUserID)
 		ranFor := time.Since(start)
 
 		if ctx.Err() != nil {
@@ -198,6 +204,7 @@ func (t *Transport) runOnce(
 	lockFor func(string) *sync.Mutex,
 	seen *eventCache,
 	botID string,
+	botUserID string,
 ) error {
 	sm := socketmode.New(api)
 
@@ -215,7 +222,7 @@ func (t *Transport) runOnce(
 				if !ok {
 					return
 				}
-				t.handleEvent(ctx, log, sm, api, dispatcher, lockFor, seen, botID, evt)
+				t.handleEvent(ctx, log, sm, api, dispatcher, lockFor, seen, botID, botUserID, evt)
 			}
 		}
 	}()
@@ -266,6 +273,7 @@ func (t *Transport) handleEvent(
 	lockFor func(string) *sync.Mutex,
 	seen *eventCache,
 	botID string,
+	botUserID string,
 	evt socketmode.Event,
 ) {
 	switch evt.Type { //nolint:exhaustive // we only handle the subset of events we care about
@@ -278,7 +286,7 @@ func (t *Transport) handleEvent(
 	case socketmode.EventTypeHello:
 		log.Debug("slack socket mode: hello")
 	case socketmode.EventTypeEventsAPI:
-		t.handleEventsAPI(ctx, log, sm, api, dispatcher, lockFor, seen, botID, evt)
+		t.handleEventsAPI(ctx, log, sm, api, dispatcher, lockFor, seen, botID, botUserID, evt)
 	default:
 		log.Debug("slack socket mode: ignoring event", "type", evt.Type)
 	}
@@ -296,6 +304,7 @@ func (t *Transport) handleEventsAPI(
 	lockFor func(string) *sync.Mutex,
 	seen *eventCache,
 	botID string,
+	botUserID string,
 	evt socketmode.Event,
 ) {
 	apiEvt, ok := evt.Data.(slackevents.EventsAPIEvent)
@@ -336,7 +345,7 @@ func (t *Transport) handleEventsAPI(
 		log.Debug("message dropped", "reason", reason, "user", msg.User, "channel", msg.Channel)
 		return
 	}
-	go t.handleMessage(ctx, log, api, dispatcher, lockFor, msg)
+	go t.handleMessage(ctx, log, api, dispatcher, lockFor, botUserID, msg)
 }
 
 // handleMessage dispatches a single filtered MessageEvent. Attachments are
@@ -348,6 +357,7 @@ func (t *Transport) handleMessage(
 	api *slackgo.Client,
 	dispatcher chat.Dispatcher,
 	lockFor func(string) *sync.Mutex,
+	botUserID string,
 	ev *slackevents.MessageEvent,
 ) {
 	convID := convIDFor(ev.Channel, ev.TimeStamp, ev.ThreadTimeStamp)
@@ -373,6 +383,16 @@ func (t *Transport) handleMessage(
 
 	text := strings.TrimSpace(ev.Text)
 	peerLog.Info("received message", "bytes", len(text), "attachments", len(atts))
+
+	if ev.ThreadTimeStamp != "" && ev.ThreadTimeStamp != ev.TimeStamp {
+		history, err := t.fetchThreadHistory(ctx, api, ev.Channel, ev.ThreadTimeStamp, ev.TimeStamp, botUserID)
+		if err != nil {
+			peerLog.Warn("thread history fetch failed; proceeding without it", "err", err)
+		} else if history != "" {
+			text = history + text
+			peerLog.Info("thread history attached", "bytes", len(history))
+		}
+	}
 
 	env := buildEnvelope(ev)
 	userMsg := chat.Message{Text: text, Attachments: atts}
@@ -423,6 +443,27 @@ func (t *Transport) handleMessage(
 		return
 	}
 	peerLog.Info("send ok", "bytes", len(body), "duration", time.Since(sendStart))
+}
+
+// fetchThreadHistory pulls prior replies in the thread anchored at threadTS
+// and formats them into a <thread_history> block to prepend to the current
+// turn. The current message (currentTS) is excluded. Errors are returned to
+// the caller so it can decide whether to log and continue.
+func (t *Transport) fetchThreadHistory(
+	ctx context.Context,
+	api *slackgo.Client,
+	channel, threadTS, currentTS, botUserID string,
+) (string, error) {
+	params := &slackgo.GetConversationRepliesParameters{
+		ChannelID: channel,
+		Timestamp: threadTS,
+		Limit:     t.threadHistoryLimit,
+	}
+	msgs, _, _, err := api.GetConversationRepliesContext(ctx, params)
+	if err != nil {
+		return "", fmt.Errorf("conversations.replies: %w", err)
+	}
+	return formatThreadHistory(msgs, currentTS, botUserID), nil
 }
 
 // downloadFiles fetches each file reference into dir, returning
