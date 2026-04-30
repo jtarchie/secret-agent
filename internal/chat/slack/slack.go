@@ -334,25 +334,39 @@ func (t *Transport) handleEventsAPI(
 		return
 	}
 	var msg *slackevents.MessageEvent
+	var eventKind string
 	switch inner := apiEvt.InnerEvent.Data.(type) {
 	case *slackevents.MessageEvent:
 		msg = inner
+		eventKind = "message"
 	case *slackevents.AppMentionEvent:
 		// AppMentionEvent fires for @-mentions even when the bot isn't
 		// a channel member. When the bot *is* a member with message.channels
 		// subscribed, both events fire for the same physical message —
 		// the seen cache below dedups them.
 		msg = messageFromAppMention(inner)
+		eventKind = "app_mention"
 	default:
-		log.Debug("events api: unhandled inner event type", "type", apiEvt.InnerEvent.Type)
+		log.Info("events api: unhandled inner event type", "type", apiEvt.InnerEvent.Type)
 		return
 	}
+	log.Info("events api: inbound",
+		"kind", eventKind, "channel", msg.Channel, "user", msg.User,
+		"ts", msg.TimeStamp, "thread_ts", msg.ThreadTimeStamp,
+		"channel_type", msg.ChannelType, "text_bytes", len(msg.Text),
+	)
 	if seen.seen(msg.Channel + ":" + msg.TimeStamp) {
-		log.Debug("message dropped", "reason", "duplicate", "channel", msg.Channel, "ts", msg.TimeStamp)
+		log.Info("message dropped",
+			"reason", "duplicate", "kind", eventKind,
+			"channel", msg.Channel, "ts", msg.TimeStamp,
+		)
 		return
 	}
 	if ok, reason := shouldDispatch(msg, botID); !ok {
-		log.Debug("message dropped", "reason", reason, "user", msg.User, "channel", msg.Channel)
+		log.Info("message dropped",
+			"reason", reason, "kind", eventKind,
+			"user", msg.User, "channel", msg.Channel,
+		)
 		return
 	}
 	go t.handleMessage(ctx, log, api, dispatcher, lockFor, botUserID, msg)
@@ -392,24 +406,52 @@ func (t *Transport) handleMessage(
 	}()
 
 	text := strings.TrimSpace(ev.Text)
-	peerLog.Info("received message", "bytes", len(text), "attachments", len(atts))
+	peerLog.Info("received message",
+		"bytes", len(text), "attachments", len(atts),
+		"ts", ev.TimeStamp, "thread_ts", ev.ThreadTimeStamp,
+	)
 
-	if ev.ThreadTimeStamp != "" && ev.ThreadTimeStamp != ev.TimeStamp {
+	switch {
+	case ev.ThreadTimeStamp == "":
+		peerLog.Info("thread history skipped", "reason", "not in a thread")
+	case ev.ThreadTimeStamp == ev.TimeStamp:
+		peerLog.Info("thread history skipped", "reason", "this is the thread parent — no prior replies")
+	default:
+		peerLog.Info("thread history fetch starting",
+			"channel", ev.Channel, "thread_ts", ev.ThreadTimeStamp, "current_ts", ev.TimeStamp,
+			"limit", t.threadHistoryLimit,
+		)
+		fetchStart := time.Now()
 		history, err := t.fetchThreadHistory(ctx, api, ev.Channel, ev.ThreadTimeStamp, ev.TimeStamp, botUserID)
-		if err != nil {
+		fetchDur := time.Since(fetchStart)
+		switch {
+		case err != nil:
 			// Surfaced at Error level so missing-scope / network failures are
 			// obvious in logs. Dispatch still proceeds with the original text.
 			peerLog.Error("thread history fetch failed; proceeding without it",
-				"err", err, "thread_ts", ev.ThreadTimeStamp,
+				"err", err, "thread_ts", ev.ThreadTimeStamp, "duration", fetchDur,
 			)
-		} else if history != "" {
+		case history == "":
+			peerLog.Info("thread history fetch ok but empty after filtering",
+				"duration", fetchDur,
+			)
+		default:
 			text = history + text
-			peerLog.Info("thread history attached", "bytes", len(history))
+			peerLog.Info("thread history attached",
+				"history_bytes", len(history), "total_bytes", len(text),
+				"duration", fetchDur,
+			)
 		}
 	}
 
 	env := buildEnvelope(ev)
 	userMsg := chat.Message{Text: text, Attachments: atts}
+
+	peerLog.Info("dispatching to router",
+		"transport", env.Transport, "kind", env.Kind,
+		"sender_id", env.SenderID, "group_id", env.GroupID,
+		"text_bytes", len(userMsg.Text), "attachments", len(userMsg.Attachments),
+	)
 
 	var reply strings.Builder
 	var replyErr error
@@ -430,7 +472,12 @@ func (t *Transport) handleMessage(
 		peerLog.Error("handler failed", "err", replyErr, "duration", dur)
 		body = "error: " + replyErr.Error()
 	} else if body == "" {
-		peerLog.Debug("empty reply — nothing to send", "duration", dur)
+		// Bumped from Debug → Info: when troubleshooting "bot is silent",
+		// knowing the dispatch ran but produced nothing is the key signal
+		// (router dropped it, no trigger match, runtime returned no chunks).
+		peerLog.Info("dispatch produced empty reply — nothing to send",
+			"chunks", chunkCount, "duration", dur,
+		)
 		return
 	} else {
 		peerLog.Info("handler done", "bytes_out", len(body), "chunks", chunkCount, "duration", dur)
