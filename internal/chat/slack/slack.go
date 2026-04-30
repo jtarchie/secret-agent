@@ -397,7 +397,11 @@ func (t *Transport) handleMessage(
 	if ev.ThreadTimeStamp != "" && ev.ThreadTimeStamp != ev.TimeStamp {
 		history, err := t.fetchThreadHistory(ctx, api, ev.Channel, ev.ThreadTimeStamp, ev.TimeStamp, botUserID)
 		if err != nil {
-			peerLog.Warn("thread history fetch failed; proceeding without it", "err", err)
+			// Surfaced at Error level so missing-scope / network failures are
+			// obvious in logs. Dispatch still proceeds with the original text.
+			peerLog.Error("thread history fetch failed; proceeding without it",
+				"err", err, "thread_ts", ev.ThreadTimeStamp,
+			)
 		} else if history != "" {
 			text = history + text
 			peerLog.Info("thread history attached", "bytes", len(history))
@@ -457,19 +461,26 @@ func (t *Transport) handleMessage(
 
 // fetchThreadHistory pulls prior replies in the thread anchored at threadTS
 // and formats them into a <thread_history> block to prepend to the current
-// turn. The current message (currentTS) is excluded. Errors are returned to
-// the caller so it can decide whether to log and continue.
+// turn. The current message (currentTS) is excluded.
+//
+// Wrapped in a strict timeout so a hung Slack API call (rate-limit retry,
+// network stall) cannot block the dispatch goroutine — the caller logs the
+// error and dispatches the original message regardless. Common failure mode
+// is `missing_scope`: conversations.replies needs channels:history /
+// groups:history / mpim:history, which most app-mention-only bots don't have.
 func (t *Transport) fetchThreadHistory(
 	ctx context.Context,
 	api *slackgo.Client,
 	channel, threadTS, currentTS, botUserID string,
 ) (string, error) {
+	fetchCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
 	params := &slackgo.GetConversationRepliesParameters{
 		ChannelID: channel,
 		Timestamp: threadTS,
 		Limit:     t.threadHistoryLimit,
 	}
-	msgs, _, _, err := api.GetConversationRepliesContext(ctx, params)
+	msgs, _, _, err := api.GetConversationRepliesContext(fetchCtx, params)
 	if err != nil {
 		return "", fmt.Errorf("conversations.replies: %w", err)
 	}
