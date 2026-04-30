@@ -283,8 +283,9 @@ func (t *Transport) handleEvent(
 }
 
 // logEventType emits a one-line log entry describing each socket-mode
-// event type at an appropriate level. Unhandled types fall through to a
-// debug "ignoring" line.
+// event type. Logged at Info so a silent-bot symptom is debuggable from
+// stderr alone — without this, hello/disconnect/error events are invisible
+// at default log level.
 func logEventType(log *slog.Logger, t socketmode.EventType) {
 	switch t {
 	case socketmode.EventTypeConnecting:
@@ -294,11 +295,11 @@ func logEventType(log *slog.Logger, t socketmode.EventType) {
 	case socketmode.EventTypeDisconnect:
 		log.Info("slack socket mode: disconnected")
 	case socketmode.EventTypeHello:
-		log.Debug("slack socket mode: hello")
+		log.Info("slack socket mode: hello")
 	case socketmode.EventTypeEventsAPI:
-		// EventsAPI events are routed to handleEventsAPI by the caller; no log here.
+		log.Info("slack socket mode: events_api event")
 	default:
-		log.Debug("slack socket mode: ignoring event", "type", t)
+		log.Info("slack socket mode: other event", "type", t)
 	}
 }
 
@@ -330,7 +331,7 @@ func (t *Transport) handleEventsAPI(
 		}
 	}
 	if apiEvt.Type != slackevents.CallbackEvent {
-		log.Debug("events api: non-callback event", "type", apiEvt.Type)
+		log.Info("events api: non-callback event", "type", apiEvt.Type)
 		return
 	}
 	var msg *slackevents.MessageEvent
