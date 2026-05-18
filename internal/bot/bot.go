@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"text/template"
 	"time"
 
 	"github.com/robfig/cron/v3"
@@ -511,7 +512,10 @@ func normalizeCron(c *Cron) error {
 	if err != nil {
 		return err
 	}
-	return validateCronBody(c)
+	if err := validateCronBody(c); err != nil {
+		return err
+	}
+	return validateCronPromptTemplate(c)
 }
 
 func validateCronCadence(c *Cron) error {
@@ -538,27 +542,40 @@ func validateCronCadence(c *Cron) error {
 }
 
 func validateCronBody(c *Cron) error {
-	set := []string{}
-	if c.Prompt != "" {
-		set = append(set, "prompt")
-	}
+	scripts := []string{}
 	if c.Sh != "" {
-		set = append(set, "sh")
+		scripts = append(scripts, "sh")
 	}
 	if c.Expr != "" {
-		set = append(set, "expr")
+		scripts = append(scripts, "expr")
 	}
 	if c.Js != "" {
-		set = append(set, "js")
+		scripts = append(scripts, "js")
 	}
-	switch len(set) {
-	case 0:
+	if len(scripts) > 1 {
+		return fmt.Errorf("only one of sh, expr, js may be set (got %s)", strings.Join(scripts, ", "))
+	}
+	if c.Prompt == "" && len(scripts) == 0 {
 		return errors.New("exactly one of prompt, sh, expr, js is required")
-	case 1:
-		return nil
-	default:
-		return fmt.Errorf("only one of prompt, sh, expr, js may be set (got %s)", strings.Join(set, ", "))
 	}
+	return nil
+}
+
+// validateCronPromptTemplate parses c.Prompt as a text/template when the
+// entry combines a prompt with a script body, so misconfigured bots fail
+// at load time rather than at first fire. Prompt-only cron entries are
+// left as literal strings.
+func validateCronPromptTemplate(c *Cron) error {
+	if c.Prompt == "" {
+		return nil
+	}
+	if c.Sh == "" && c.Expr == "" && c.Js == "" {
+		return nil
+	}
+	if _, err := template.New(c.Name).Parse(c.Prompt); err != nil {
+		return fmt.Errorf("invalid prompt template: %w", err)
+	}
+	return nil
 }
 
 func validateHookBody(h *Hook) error {

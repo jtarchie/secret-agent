@@ -272,3 +272,241 @@ func TestSchedulerExprFires(t *testing.T) {
 		t.Fatalf("run: %v", err)
 	}
 }
+
+func TestSchedulerHybridShFiresPromptWithOutput(t *testing.T) {
+	runner := &stubRunner{reply: "ok"}
+	b := &bot.Bot{
+		Name: "tbot",
+		Cron: []bot.Cron{{
+			Name:   "greet",
+			Every:  "1s",
+			Sh:     "echo hello",
+			Prompt: "got: {{.Output}}",
+		}},
+	}
+	s := New(discardLogger(), nil)
+	if err := s.Register(b, runner); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+	defer cancel()
+	if err := s.Run(ctx); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	convIDs, texts := runner.snapshot()
+	if len(convIDs) < 1 {
+		t.Fatalf("expected at least one invocation, got %d", len(convIDs))
+	}
+	if convIDs[0] != "cron:tbot:greet" {
+		t.Errorf("convID = %q", convIDs[0])
+	}
+	if !strings.HasPrefix(texts[0], "got: hello") {
+		t.Errorf("text = %q, want prefix %q", texts[0], "got: hello")
+	}
+}
+
+func TestSchedulerHybridShFailureInjectsErr(t *testing.T) {
+	runner := &stubRunner{reply: "ok"}
+	b := &bot.Bot{
+		Name: "tbot",
+		Cron: []bot.Cron{{
+			Name:   "boom",
+			Every:  "1s",
+			Sh:     "exit 7",
+			Prompt: "exit={{.ExitCode}} err={{.Err}}",
+		}},
+	}
+	s := New(discardLogger(), nil)
+	if err := s.Register(b, runner); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+	defer cancel()
+	if err := s.Run(ctx); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	_, texts := runner.snapshot()
+	if len(texts) < 1 {
+		t.Fatalf("script failure should not skip turn; got 0 invocations")
+	}
+	if !strings.Contains(texts[0], "exit=1") {
+		t.Errorf("text = %q, want exit=1", texts[0])
+	}
+	if !strings.Contains(texts[0], "err=") || strings.HasSuffix(texts[0], "err=") {
+		t.Errorf("text = %q, want non-empty .Err", texts[0])
+	}
+}
+
+func TestSchedulerHybridExprFiresPromptWithJSON(t *testing.T) {
+	runner := &stubRunner{reply: "ok"}
+	b := &bot.Bot{
+		Name: "tbot",
+		Cron: []bot.Cron{{
+			Name:   "compute",
+			Every:  "1s",
+			Expr:   "1 + 1",
+			Prompt: "value={{.Output}}",
+		}},
+	}
+	s := New(discardLogger(), nil)
+	if err := s.Register(b, runner); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+	defer cancel()
+	if err := s.Run(ctx); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	_, texts := runner.snapshot()
+	if len(texts) < 1 {
+		t.Fatalf("expected at least one invocation")
+	}
+	if texts[0] != "value=2" {
+		t.Errorf("text = %q, want %q", texts[0], "value=2")
+	}
+}
+
+func TestSchedulerHybridJsFiresPromptWithJSON(t *testing.T) {
+	runner := &stubRunner{reply: "ok"}
+	b := &bot.Bot{
+		Name: "tbot",
+		Cron: []bot.Cron{{
+			Name:   "jsfire",
+			Every:  "1s",
+			Js:     "({a:1, b:2})",
+			Prompt: "obj={{.Output}}",
+		}},
+	}
+	s := New(discardLogger(), nil)
+	if err := s.Register(b, runner); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+	defer cancel()
+	if err := s.Run(ctx); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	_, texts := runner.snapshot()
+	if len(texts) < 1 {
+		t.Fatalf("expected at least one invocation")
+	}
+	if !strings.HasPrefix(texts[0], "obj=") {
+		t.Errorf("text = %q, want prefix obj=", texts[0])
+	}
+	if !strings.Contains(texts[0], `"a":1`) || !strings.Contains(texts[0], `"b":2`) {
+		t.Errorf("text = %q, want JSON-marshaled object fields", texts[0])
+	}
+}
+
+func TestSchedulerHybridTruncatesLargeOutput(t *testing.T) {
+	runner := &stubRunner{reply: "ok"}
+	// printf %.0sA twice 10000 produces 20000 A's, > MaxScriptOutputBytes.
+	b := &bot.Bot{
+		Name: "tbot",
+		Cron: []bot.Cron{{
+			Name:   "big",
+			Every:  "1s",
+			Sh:     `head -c 20000 /dev/zero | tr '\0' A`,
+			Prompt: "len={{len .Output}}",
+		}},
+	}
+	s := New(discardLogger(), nil)
+	if err := s.Register(b, runner); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+	defer cancel()
+	if err := s.Run(ctx); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	_, texts := runner.snapshot()
+	if len(texts) < 1 {
+		t.Fatalf("expected at least one invocation")
+	}
+	// {{len .Output}} reports the truncated length: MaxScriptOutputBytes
+	// plus the marker bytes.
+	if !strings.HasPrefix(texts[0], "len=") {
+		t.Fatalf("text = %q", texts[0])
+	}
+	// Sanity: the rendered length must be greater than the cap (because of
+	// the marker) but well under raw 20000.
+	if len(texts[0]) > 200 {
+		t.Errorf("rendered prompt unexpectedly long: %d bytes", len(texts[0]))
+	}
+}
+
+func TestSchedulerHybridTemplateRenderErrorSkipsTurn(t *testing.T) {
+	runner := &stubRunner{reply: "ok"}
+	// Parses fine but .NotAField doesn't exist on scriptResult, so
+	// execution fails and the LLM turn should be skipped.
+	b := &bot.Bot{
+		Name: "tbot",
+		Cron: []bot.Cron{{
+			Name:   "bad",
+			Every:  "1s",
+			Sh:     "echo ok",
+			Prompt: "{{.NotAField.X}}",
+		}},
+	}
+	s := New(discardLogger(), nil)
+	if err := s.Register(b, runner); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+	defer cancel()
+	if err := s.Run(ctx); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	convIDs, _ := runner.snapshot()
+	if len(convIDs) != 0 {
+		t.Errorf("template render failure should skip LLM turn, got %d invocations", len(convIDs))
+	}
+}
+
+func TestSchedulerHybridSendersAvailableToScript(t *testing.T) {
+	sender := &fakeSender{}
+	reg := chat.SenderRegistry{"signal": sender}
+	runner := &stubRunner{reply: "ok"}
+	b := &bot.Bot{
+		Name: "tbot",
+		Cron: []bot.Cron{{
+			Name:   "dispatch",
+			Every:  "1s",
+			Sh:     `sa_send signal +15551234567 "hello from cron" && echo sent`,
+			Prompt: "result: {{.Output}}",
+		}},
+	}
+	s := New(discardLogger(), reg)
+	if err := s.Register(b, runner); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+	defer cancel()
+	if err := s.Run(ctx); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	if sender.count() < 1 {
+		t.Errorf("expected sa_send to be invoked from hybrid sh body")
+	}
+	_, texts := runner.snapshot()
+	if len(texts) < 1 {
+		t.Fatalf("expected at least one LLM invocation")
+	}
+	if !strings.HasPrefix(texts[0], "result: ") {
+		t.Errorf("text = %q, want prefix 'result: '", texts[0])
+	}
+}

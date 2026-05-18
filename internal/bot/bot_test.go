@@ -103,19 +103,40 @@ cron:
     schedule: "0 9 * * *"
     js: |
       1 + 2
+  - name: hybrid_sh
+    every: 1m
+    sh: echo hi
+    prompt: "got {{.Output}}"
+  - name: hybrid_expr
+    every: 1m
+    expr: 1+1
+    prompt: "expr={{.Output}}"
+  - name: hybrid_js
+    every: 1m
+    js: "1+2"
+    prompt: "js={{.Output}}"
 `)
 	b, err := Load(p)
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
-	if len(b.Cron) != 4 {
-		t.Fatalf("len(Cron) = %d, want 4", len(b.Cron))
+	if len(b.Cron) != 7 {
+		t.Fatalf("len(Cron) = %d, want 7", len(b.Cron))
 	}
 	if b.Cron[0].Name != "deliver" || b.Cron[0].Schedule != "*/5 * * * *" || b.Cron[0].Sh != "echo ok" {
 		t.Errorf("entry[0] = %+v", b.Cron[0])
 	}
 	if b.Cron[1].Every != "1m" || b.Cron[1].Prompt != "check things" {
 		t.Errorf("entry[1] = %+v", b.Cron[1])
+	}
+	if b.Cron[4].Sh != "echo hi" || b.Cron[4].Prompt != "got {{.Output}}" {
+		t.Errorf("hybrid_sh = %+v", b.Cron[4])
+	}
+	if b.Cron[5].Expr != "1+1" || b.Cron[5].Prompt != "expr={{.Output}}" {
+		t.Errorf("hybrid_expr = %+v", b.Cron[5])
+	}
+	if b.Cron[6].Js != "1+2" || b.Cron[6].Prompt != "js={{.Output}}" {
+		t.Errorf("hybrid_js = %+v", b.Cron[6])
 	}
 }
 
@@ -207,15 +228,38 @@ cron:
 			want: "exactly one of prompt, sh, expr, js",
 		},
 		{
-			name: "multiple_bodies",
+			name: "multiple_scripts_sh_expr",
 			yaml: `
 cron:
   - name: x
     every: 5s
     sh: echo ok
+    expr: 1+1
+`,
+			want: "only one of sh, expr, js",
+		},
+		{
+			name: "multiple_scripts_with_prompt",
+			yaml: `
+cron:
+  - name: x
+    every: 5s
+    sh: echo ok
+    expr: 1+1
     prompt: ping
 `,
-			want: "only one of prompt, sh, expr, js",
+			want: "only one of sh, expr, js",
+		},
+		{
+			name: "bad_template_parse",
+			yaml: `
+cron:
+  - name: x
+    every: 5s
+    sh: echo ok
+    prompt: "hello {{ .Output"
+`,
+			want: "invalid prompt template",
 		},
 		{
 			name: "bad_name",

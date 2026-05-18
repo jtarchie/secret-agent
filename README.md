@@ -323,16 +323,17 @@ Exactly one of `command` / `url` is required.
 
 ### Cron
 
-Scheduled directives that run the bot without an incoming user message. Each entry fires on its own cadence and invokes one of four bodies: a synthetic `prompt:` (runs through the agent as a simulated user turn) or a `sh:` / `expr:` / `js:` body (bypasses the LLM).
+Scheduled directives that run the bot without an incoming user message. Each entry fires on its own cadence and invokes either a synthetic `prompt:` (runs through the agent as a simulated user turn), a `sh:` / `expr:` / `js:` body (bypasses the LLM), or a **hybrid** — a script paired with a `prompt:` that templates the script's result before firing the LLM turn.
 
 | Field | Type | Purpose |
 |---|---|---|
 | `name` | string | Unique within the bot (matches `[A-Za-z_][A-Za-z0-9_]*`). |
 | `schedule` | string | Standard 5-field cron expression, e.g. `*/5 * * * *`. |
 | `every` | duration | Go duration (`30s`, `5m`, `1h`). Minimum `1s`. |
-| `prompt` / `sh` / `expr` / `js` | string | Directive body — exactly one required. |
+| `prompt` | string | Synthetic user turn. Treated as a Go `text/template` when combined with a script body; otherwise a literal string. |
+| `sh` / `expr` / `js` | string | Direct script body. At most one may be set. |
 
-Exactly one of `schedule` / `every` and exactly one of `prompt` / `sh` / `expr` / `js` must be set. `prompt:` turns share a synthetic conversation id `cron:<bot>:<cron>`, so `permissions.memory: full` bots accumulate context across fires; `memory: none` bots get a fresh session per fire via the same stateless branch the message handler uses. If a previous fire is still running when the next cadence tick arrives, the new fire is skipped with a warn log (via robfig/cron's `SkipIfStillRunning`). Output is logged — not routed — so if you want to notify a user, call `sa_send` from `sh:` or use the `send_message` binding / tool (see *Outbound send* below).
+Exactly one of `schedule` / `every` is required. At least one of `prompt` / `sh` / `expr` / `js` is required; `prompt:` may be combined with **one** of `sh:` / `expr:` / `js:` (hybrid mode — see below). `prompt:` turns share a synthetic conversation id `cron:<bot>:<cron>`, so `permissions.memory: full` bots accumulate context across fires; `memory: none` bots get a fresh session per fire via the same stateless branch the message handler uses. If a previous fire is still running when the next cadence tick arrives, the new fire is skipped with a warn log (via robfig/cron's `SkipIfStillRunning`). Output is logged — not routed — so if you want to notify a user, call `sa_send` from `sh:` or use the `send_message` binding / tool (see *Outbound send* below).
 
 ```yaml
 cron:
@@ -347,6 +348,33 @@ cron:
 ```
 
 See [examples/reminders/bot.yml](examples/reminders/bot.yml) for the full reminders-delivery cron.
+
+#### Hybrid prompt + script
+
+When `prompt:` is paired with one of `sh:` / `expr:` / `js:`, the script runs first and its result is templated into the prompt via Go's [`text/template`](https://pkg.go.dev/text/template) before the LLM turn fires (same `cron:<bot>:<cron>` conversation id). Useful for "gather data with a script, then reason over it" patterns where wrapping the script as a tool would be overkill.
+
+Template fields:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `.Output` | string | `sh:` stdout, or the JSON-marshaled value returned by `expr:` / `js:`. Hard-capped at 16 KiB; longer outputs are truncated with a `…[truncated N bytes]` marker. |
+| `.Err` | string | Error message; empty on success. |
+| `.ExitCode` | int | `0` on success, `1` on any script failure. |
+
+Script failure does **not** skip the LLM turn — the template renders with `.Err` populated and `.ExitCode != 0`, so the prompt can react to the failure. Template parse errors are caught at bot-load time; render errors at fire time are logged via the scheduler's error path and skip that fire's LLM turn.
+
+```yaml
+cron:
+  - name: morning_brief
+    schedule: "0 8 * * *"
+    sh: |
+      sqlite3 "$db" "SELECT body FROM reminders WHERE remind_at <= date('now')"
+    prompt: |
+      {{if .Err}}Reminders query failed: {{.Err}}. Tell the user something went wrong.
+      {{else}}Here are today's due reminders:
+      {{.Output}}
+      Compose a friendly morning briefing.{{end}}
+```
 
 ### Outbound send
 

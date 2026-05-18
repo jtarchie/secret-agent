@@ -136,6 +136,12 @@ func makeJob(entry bot.Cron, botName string, rt Runner, senders chat.SenderRegis
 
 func describe(c bot.Cron) (mode, trigger string) {
 	switch {
+	case c.Prompt != "" && c.Sh != "":
+		mode = "prompt+sh"
+	case c.Prompt != "" && c.Expr != "":
+		mode = "prompt+expr"
+	case c.Prompt != "" && c.Js != "":
+		mode = "prompt+js"
 	case c.Prompt != "":
 		mode = "prompt"
 	case c.Sh != "":
@@ -156,9 +162,18 @@ func describe(c bot.Cron) (mode, trigger string) {
 // runEntry dispatches the entry to its executor and returns the number of
 // output bytes produced.
 func runEntry(ctx context.Context, entry bot.Cron, botName string, rt Runner, senders chat.SenderRegistry) (int, error) {
+	hasScript := entry.Sh != "" || entry.Expr != "" || entry.Js != ""
+	if entry.Prompt != "" && hasScript {
+		res := runCronScript(ctx, entry, senders)
+		prompt, err := renderPromptTemplate(entry, res)
+		if err != nil {
+			return 0, err
+		}
+		return runPrompt(ctx, prompt, botName, entry.Name, rt)
+	}
 	switch {
 	case entry.Prompt != "":
-		return runPrompt(ctx, entry, botName, rt)
+		return runPrompt(ctx, entry.Prompt, botName, entry.Name, rt)
 	case entry.Sh != "":
 		out, err := tool.RunShellScript(ctx, entry.Sh, entry.Name, senders)
 		return len(out), err
@@ -176,10 +191,10 @@ func runEntry(ctx context.Context, entry bot.Cron, botName string, rt Runner, se
 // handler. The convID is stable across fires so `memory: full` bots
 // accumulate context — `memory: none` bots get a fresh session per turn
 // via runtime's existing stateless branch.
-func runPrompt(ctx context.Context, entry bot.Cron, botName string, rt Runner) (int, error) {
-	convID := fmt.Sprintf("cron:%s:%s", botName, entry.Name)
+func runPrompt(ctx context.Context, prompt, botName, cronName string, rt Runner) (int, error) {
+	convID := fmt.Sprintf("cron:%s:%s", botName, cronName)
 	handler := rt.HandlerFor(convID)
-	out := handler(ctx, chat.Message{Text: entry.Prompt})
+	out := handler(ctx, chat.Message{Text: prompt})
 	total := 0
 	for chunk := range out {
 		if chunk.Err != nil {
