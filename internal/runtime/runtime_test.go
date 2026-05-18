@@ -397,6 +397,39 @@ func TestModelResolverCalledPerBotInTree(t *testing.T) {
 	}
 }
 
+func TestSubAgentModelOverrideFlowsToResolver(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	childPath := filepath.Join(dir, "child.yml")
+	err := os.WriteFile(childPath, []byte("name: child\nsystem: s\nmodel: ollama/llama3\n"), 0o600)
+	if err != nil {
+		t.Fatalf("write child: %v", err)
+	}
+	parentPath := filepath.Join(dir, "parent.yml")
+	parentYAML := "name: parent\nsystem: s\nagents:\n  helper:\n    file: child.yml\n    description: helps\n    model: anthropic/claude-haiku-4-5-20251001\n"
+	err = os.WriteFile(parentPath, []byte(parentYAML), 0o600)
+	if err != nil {
+		t.Fatalf("write parent: %v", err)
+	}
+	b, err := bot.Load(parentPath)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+
+	seen := map[string]string{}
+	resolver := func(bb *bot.Bot) (adkmodel.LLM, error) {
+		seen[bb.Name] = bb.Model
+		return stubLLM{}, nil
+	}
+	_, err = New(ctx, b, stubLLM{}, WithModelResolver(resolver))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if got := seen["child"]; got != "anthropic/claude-haiku-4-5-20251001" {
+		t.Errorf("resolver saw child.Model = %q, want AgentRef override to win over child YAML", got)
+	}
+}
+
 func TestModelResolverErrorPropagates(t *testing.T) {
 	ctx := context.Background()
 	b := writeBot(t, `

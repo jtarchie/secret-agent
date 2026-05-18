@@ -1187,6 +1187,139 @@ model: claude-sonnet-4-5
 	}
 }
 
+func TestAgentRefModelOverrideAppliedToFileChild(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "child.yml", `
+name: child
+system: s
+`)
+	parent := writeFile(t, dir, "parent.yml", `
+name: parent
+system: s
+agents:
+  helper:
+    file: ./child.yml
+    description: helps
+    model: anthropic/claude-haiku-4-5-20251001
+`)
+	b, err := Load(parent)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	ref := b.Agents["helper"]
+	if ref.Bot == nil {
+		t.Fatal("child not resolved")
+	}
+	if ref.Bot.Model != "anthropic/claude-haiku-4-5-20251001" {
+		t.Errorf("child.Model = %q, want override applied", ref.Bot.Model)
+	}
+}
+
+func TestAgentRefModelOverrideBeatsChildYAML(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "child.yml", `
+name: child
+system: s
+model: ollama/llama3
+`)
+	parent := writeFile(t, dir, "parent.yml", `
+name: parent
+system: s
+agents:
+  helper:
+    file: ./child.yml
+    description: helps
+    model: anthropic/claude-haiku-4-5-20251001
+`)
+	b, err := Load(parent)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if got := b.Agents["helper"].Bot.Model; got != "anthropic/claude-haiku-4-5-20251001" {
+		t.Errorf("child.Model = %q, want AgentRef override to win over child YAML", got)
+	}
+}
+
+func TestAgentRefModelOverrideAppliedToBuiltin(t *testing.T) {
+	p := writeBot(t, `
+name: parent
+system: s
+agents:
+  reviewer:
+    builtin: code-reviewer
+    description: reviews
+    model: anthropic/claude-haiku-4-5-20251001
+`)
+	b, err := Load(p)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	ref := b.Agents["reviewer"]
+	if ref.Bot == nil {
+		t.Fatal("builtin child not resolved")
+	}
+	if ref.Bot.Model != "anthropic/claude-haiku-4-5-20251001" {
+		t.Errorf("builtin child.Model = %q, want override applied", ref.Bot.Model)
+	}
+}
+
+func TestAgentRefAPIKeyEnvAndBaseURLOverride(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "child.yml", `
+name: child
+system: s
+`)
+	parent := writeFile(t, dir, "parent.yml", `
+name: parent
+system: s
+agents:
+  helper:
+    file: ./child.yml
+    description: helps
+    model: ollama/llama3
+    api_key_env: HELPER_KEY
+    base_url: http://localhost:11434/v1
+`)
+	b, err := Load(parent)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	child := b.Agents["helper"].Bot
+	if child.Model != "ollama/llama3" {
+		t.Errorf("Model = %q", child.Model)
+	}
+	if child.APIKeyEnv != "HELPER_KEY" {
+		t.Errorf("APIKeyEnv = %q", child.APIKeyEnv)
+	}
+	if child.BaseURL != "http://localhost:11434/v1" {
+		t.Errorf("BaseURL = %q", child.BaseURL)
+	}
+}
+
+func TestAgentRefInvalidModelRejected(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "child.yml", `
+name: child
+system: s
+`)
+	parent := writeFile(t, dir, "parent.yml", `
+name: parent
+system: s
+agents:
+  helper:
+    file: ./child.yml
+    description: helps
+    model: claude-haiku
+`)
+	_, err := Load(parent)
+	if err == nil {
+		t.Fatal("expected error for AgentRef model without provider prefix")
+	}
+	if !strings.Contains(err.Error(), "provider/model-name") {
+		t.Errorf("error should hint at provider/model-name form: %v", err)
+	}
+}
+
 func TestLoadMarkdownParamShorthand(t *testing.T) {
 	p := writeBot(t, `
 name: b

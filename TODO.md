@@ -1,5 +1,3 @@
 - interface with whatsapp
 - support secrets via environment variables
-- cron scheduling?
 - withing a container image / Dockerfile
-- subagents can specify their own models?

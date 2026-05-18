@@ -209,6 +209,15 @@ type AgentRef struct {
 	// to the sub-agent. Default false: the sub-agent never sees attachments.
 	Attachments bool `yaml:"attachments"`
 
+	// Model, APIKeyEnv, and BaseURL are optional per-AgentRef overrides that
+	// pin the sub-agent to a specific endpoint regardless of what the child's
+	// own YAML declares. Each non-empty value is written onto the loaded child
+	// at parse time, so AgentRef wins over the child's own model fields. Works
+	// for both file: and builtin: sub-agents.
+	Model     string `yaml:"model,omitempty"`
+	APIKeyEnv string `yaml:"api_key_env,omitempty"`
+	BaseURL   string `yaml:"base_url,omitempty"`
+
 	// Bot is the resolved child bot, populated by Load. Not read from YAML.
 	Bot *Bot `yaml:"-"`
 }
@@ -1026,7 +1035,36 @@ func resolveAgents(b *Bot, toolNames map[string]struct{}, path, baseDir string, 
 			return err
 		}
 		ref.Bot = child
+		err = applyAgentRefOverride(&ref, child, path, key)
+		if err != nil {
+			return err
+		}
 		b.Agents[key] = ref
+	}
+	return nil
+}
+
+// applyAgentRefOverride writes any non-empty model/api_key_env/base_url
+// override declared on the AgentRef onto the loaded child bot, so the
+// parent's choice wins over whatever the child YAML itself declared. Model
+// strings are validated against the same provider/model-name shape as
+// normalizeBotHeader.
+func applyAgentRefOverride(ref *AgentRef, child *Bot, path, key string) error {
+	ref.Model = strings.TrimSpace(ref.Model)
+	ref.APIKeyEnv = strings.TrimSpace(ref.APIKeyEnv)
+	ref.BaseURL = strings.TrimSpace(ref.BaseURL)
+	if ref.Model != "" {
+		idx := strings.Index(ref.Model, "/")
+		if idx <= 0 || strings.TrimSpace(ref.Model[:idx]) == "" {
+			return fmt.Errorf("%s: agent %q: model: %q must be in the form provider/model-name", path, key, ref.Model)
+		}
+		child.Model = ref.Model
+	}
+	if ref.APIKeyEnv != "" {
+		child.APIKeyEnv = ref.APIKeyEnv
+	}
+	if ref.BaseURL != "" {
+		child.BaseURL = ref.BaseURL
 	}
 	return nil
 }

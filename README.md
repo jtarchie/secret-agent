@@ -291,14 +291,20 @@ Shell tools also get the `sa_send` builtin for dispatching outbound messages; se
 | `description` | string | Exposed to parent LLM. |
 | `skip_summarization` | bool | Pass raw output back to parent. |
 | `attachments` | bool | Let parent forward attachments. |
+| `model` | string | Optional `provider/model-name` override for this sub-agent. Wins over the child YAML's own `model:`. Works for both `file:` and `builtin:`. |
+| `api_key_env` | string | Optional env-var name for the sub-agent's API key. Same precedence as `model`. |
+| `base_url` | string | Optional base URL for the sub-agent. Same precedence as `model`. |
 
 Exactly one of `file` / `builtin` is required. Built-ins skip the per-project YAML — handy for generic helpers like a summarizer or code reviewer. List what ships in this binary with `secret-agent list-builtins`.
+
+A file-based sub-agent's own YAML may declare `model:` / `api_key_env:` / `base_url:` and those are honored on its own LLM calls; the AgentRef override above wins field-by-field when both are set. Built-in sub-agents inherit the parent's model unless the AgentRef pins one explicitly.
 
 ```yaml
 agents:
   reviewer:
     builtin: code-reviewer
     description: Reviews code diffs for bugs and style issues.
+    model: anthropic/claude-haiku-4-5-20251001   # cheaper than the parent's model
 ```
 
 ### Hooks
