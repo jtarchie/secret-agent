@@ -493,6 +493,62 @@ tests:
         contains: ["Ada"]
 ```
 
+### `secret-agent once <bot.yml>`
+
+Runs **one** non-interactive agent turn from a single bot YAML and returns the reply — no TUI, no transports, no router. Built for automation: call it from a script or loop, feed it a message (and optional attachments), and capture the output. Each invocation is **stateless** (a fresh in-memory session), so runs are independent and safe to parallelize.
+
+The model is optional on the command line: if the bot YAML declares its own `model:` / `api_key_env:` / `base_url:`, the flags can be omitted (and when both are present, the YAML wins, mirroring `run`/`eval`). If neither the flags nor the YAML name a model, the command errors.
+
+| Flag | Default | Purpose |
+|---|---|---|
+| `-m`, `--message` | — | User message. If omitted, the message is read from **stdin** when piped. |
+| `-a`, `--attach` | — | Attach a file (repeatable). Text files are inlined; binary files (images, PDFs) are sent to the model. |
+| `-o`, `--output` | — | Write the reply to `FILE` instead of stdout. |
+| `--json` | `false` | Emit a structured JSON object instead of plain text (see below). |
+| `--model` | — | `provider/model-name`. Optional; fallback when the YAML omits `model:`. |
+| `--api-key` | — | Model provider API key. Optional; fallback when the YAML omits `api_key_env:`. |
+| `--base-url` | — | Override provider base URL. |
+| `--skip-preflight` | `false` | Skip the model + MCP reachability checks. **Pass this in tight loops** to avoid a per-call round-trip. |
+| `--sender-phone` | — | Value exposed to tools as `$SENDER_PHONE`. |
+| `--timeout` | `0` | Abort the turn after this duration (`0` = no timeout), e.g. `--timeout 60s`. |
+| `-v`, `--verbose` | `0` | `-v` enables debug logs + a per-tool-call trace. |
+
+**Output contract:** the reply goes to stdout (or `-o FILE`); **all logs, the tool trace, and errors go to stderr**, so stdout stays clean for piping. A mid-turn error suppresses output and exits non-zero (in text mode nothing is written; in `--json` mode the object is still emitted with `error` populated, then the process exits non-zero).
+
+`--json` shape:
+
+```json
+{
+  "output": "…final assistant text…",
+  "tool_calls": [
+    { "name": "greet", "args": { "who": "Ada" }, "result": { "output": "Hello, Ada!" }, "error": "" }
+  ],
+  "error": null
+}
+```
+
+Examples:
+
+```bash
+# message via flag, reply to stdout
+./secret-agent once examples/hello-world.yml --model … --api-key … -m "please greet Ada"
+
+# pipe the message in, write the reply to a file (skip preflight for loops)
+echo "summarize the notes" | ./secret-agent once agent.yml --model … --api-key … \
+  -o out.md --skip-preflight
+
+# structured output, parsed with jq
+./secret-agent once agent.yml --model … --api-key … --json -m "what is 17 + 25?" | jq -r .output
+
+# attachment + message
+./secret-agent once agent.yml --model … --api-key … -m "describe this" -a photo.jpg
+
+# loop over inputs
+for f in *.csv; do
+  ./secret-agent once summarize.yml --skip-preflight -m "summarize" -a "$f" -o "$f.md"
+done
+```
+
 ### `secret-agent signal-link`
 
 | Flag | Default | Purpose |
