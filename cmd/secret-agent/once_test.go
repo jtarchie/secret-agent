@@ -127,8 +127,10 @@ func TestMarshalOnceJSON(t *testing.T) {
 		{Name: "greet", Args: map[string]any{"who": "Ada"}, Result: map[string]any{"output": "Hello, Ada!"}},
 	}
 
+	usage := &runtime.Usage{InputTokens: 10, OutputTokens: 5, TotalTokens: 15}
+
 	var ok onceOutput
-	err := json.Unmarshal(marshalOnceJSON("hi", calls, nil), &ok)
+	err := json.Unmarshal(marshalOnceJSON("hi", calls, usage, nil), &ok)
 	if err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
@@ -141,13 +143,22 @@ func TestMarshalOnceJSON(t *testing.T) {
 	if len(ok.ToolCalls) != 1 || ok.ToolCalls[0].Name != "greet" {
 		t.Errorf("ToolCalls = %+v, want one greet call", ok.ToolCalls)
 	}
+	if ok.Usage == nil {
+		t.Fatal("Usage = nil, want populated")
+	}
+	if ok.Usage.InputTokens != 10 || ok.Usage.OutputTokens != 5 || ok.Usage.TotalTokens != 15 {
+		t.Errorf("Usage = %+v, want {10 5 15}", *ok.Usage)
+	}
 
 	var failed onceOutput
-	err = json.Unmarshal(marshalOnceJSON("", nil, errors.New("boom")), &failed)
+	err = json.Unmarshal(marshalOnceJSON("", nil, nil, errors.New("boom")), &failed)
 	if err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
 	if failed.Error == nil || *failed.Error != "boom" {
 		t.Errorf("Error = %v, want \"boom\"", failed.Error)
+	}
+	if failed.Usage != nil {
+		t.Errorf("Usage = %+v, want nil when no usage reported", *failed.Usage)
 	}
 }

@@ -78,9 +78,11 @@ func (c *OnceCmd) Run() error {
 	}
 
 	rec, snapshot := newRecorder(logger, c.Verbose >= 1)
+	usageRec, usageSnapshot := newUsageRecorder()
 	rt, err := runtime.New(ctx, b, res.defaultLLM,
 		runtime.WithModelResolver(res.resolver),
 		runtime.WithToolRecorder(rec),
+		runtime.WithUsageRecorder(usageRec),
 	)
 	if err != nil {
 		return fmt.Errorf("build runtime: %w", err)
@@ -105,7 +107,12 @@ func (c *OnceCmd) Run() error {
 		reply.WriteString(ch.Delta)
 	}
 
-	return c.writeResult(reply.String(), snapshot(), streamErr)
+	usage := usageSnapshot()
+	if usage != nil {
+		logger.Debug("usage", "input", usage.InputTokens, "output", usage.OutputTokens, "total", usage.TotalTokens)
+	}
+
+	return c.writeResult(reply.String(), snapshot(), usage, streamErr)
 }
 
 // resolved bundles the per-bot model resolution outputs so Run stays flat.
@@ -230,14 +237,36 @@ func newRecorder(logger *slog.Logger, trace bool) (runtime.ToolRecorder, func() 
 	return rec, snapshot
 }
 
+// newUsageRecorder returns a runtime.UsageRecorder that captures the turn's
+// token usage. snapshot returns the captured usage, or nil if no model
+// response reported any.
+func newUsageRecorder() (runtime.UsageRecorder, func() *runtime.Usage) {
+	var (
+		mu sync.Mutex
+		u  *runtime.Usage
+	)
+	rec := func(got runtime.Usage) {
+		cp := got
+		mu.Lock()
+		u = &cp
+		mu.Unlock()
+	}
+	snapshot := func() *runtime.Usage {
+		mu.Lock()
+		defer mu.Unlock()
+		return u
+	}
+	return rec, snapshot
+}
+
 // writeResult buffers the full reply and writes it exactly once, so a mid-stream
 // error never leaves a partial -o file. In text mode a stream error suppresses
 // output and is surfaced (exit 1); in JSON mode the object is emitted with the
 // error populated, then the error is still returned for a non-zero exit code.
-func (c *OnceCmd) writeResult(text string, calls []runtime.ToolCall, streamErr error) error {
+func (c *OnceCmd) writeResult(text string, calls []runtime.ToolCall, usage *runtime.Usage, streamErr error) error {
 	var payload []byte
 	if c.JSON {
-		payload = marshalOnceJSON(text, calls, streamErr)
+		payload = marshalOnceJSON(text, calls, usage, streamErr)
 	} else {
 		if streamErr != nil {
 			return fmt.Errorf("turn failed: %w", streamErr)
@@ -270,24 +299,36 @@ type onceToolCall struct {
 	Error  string         `json:"error"`
 }
 
+type onceUsage struct {
+	InputTokens  int `json:"input_tokens"`
+	OutputTokens int `json:"output_tokens"`
+	TotalTokens  int `json:"total_tokens"`
+}
+
 type onceOutput struct {
 	Output    string         `json:"output"`
 	ToolCalls []onceToolCall `json:"tool_calls"`
+	Usage     *onceUsage     `json:"usage"`
 	Error     *string        `json:"error"`
 }
 
 // marshalOnceJSON renders the structured --json payload. It never fails: the
-// values are plain Go types that always marshal.
-func marshalOnceJSON(text string, calls []runtime.ToolCall, streamErr error) []byte {
+// values are plain Go types that always marshal. usage is nil when no model
+// response reported token counts.
+func marshalOnceJSON(text string, calls []runtime.ToolCall, usage *runtime.Usage, streamErr error) []byte {
 	tcs := make([]onceToolCall, 0, len(calls))
 	for _, c := range calls {
 		tcs = append(tcs, onceToolCall{Name: c.Name, Args: c.Args, Result: c.Result, Error: c.ErrMsg})
+	}
+	var u *onceUsage
+	if usage != nil {
+		u = &onceUsage{InputTokens: usage.InputTokens, OutputTokens: usage.OutputTokens, TotalTokens: usage.TotalTokens}
 	}
 	var errStr *string
 	if streamErr != nil {
 		s := streamErr.Error()
 		errStr = &s
 	}
-	out, _ := json.MarshalIndent(onceOutput{Output: text, ToolCalls: tcs, Error: errStr}, "", "  ")
+	out, _ := json.MarshalIndent(onceOutput{Output: text, ToolCalls: tcs, Usage: u, Error: errStr}, "", "  ")
 	return append(out, '\n')
 }

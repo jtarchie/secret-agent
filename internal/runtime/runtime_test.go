@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"iter"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,10 +10,89 @@ import (
 	"time"
 
 	adkmodel "google.golang.org/adk/model"
+	"google.golang.org/adk/session"
+	"google.golang.org/genai"
 
 	"github.com/jtarchie/secret-agent/internal/bot"
 	"github.com/jtarchie/secret-agent/internal/chat"
 )
+
+// usageLLM yields a single final response carrying text and token usage, so a
+// turn through it exercises the usage-accumulation path in runTurn.
+type usageLLM struct {
+	in, out, total int32
+}
+
+func (usageLLM) Name() string { return "usage" }
+
+func (m usageLLM) GenerateContent(_ context.Context, _ *adkmodel.LLMRequest, _ bool) iter.Seq2[*adkmodel.LLMResponse, error] {
+	return func(yield func(*adkmodel.LLMResponse, error) bool) {
+		yield(&adkmodel.LLMResponse{
+			Content: genai.NewContentFromText("done", genai.RoleModel),
+			UsageMetadata: &genai.GenerateContentResponseUsageMetadata{
+				PromptTokenCount:     m.in,
+				CandidatesTokenCount: m.out,
+				TotalTokenCount:      m.total,
+			},
+		}, nil)
+	}
+}
+
+func TestUsageRecorderSumsTokenCounts(t *testing.T) {
+	ctx := context.Background()
+	b := writeBot(t, "name: b\nsystem: s\n")
+
+	var got *Usage
+	rt, err := New(ctx, b, usageLLM{in: 10, out: 5, total: 15},
+		WithUsageRecorder(func(u Usage) { got = &u }))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	for ch := range rt.HandlerFor("conv")(ctx, chat.Message{Text: "ping"}) {
+		if ch.Err != nil {
+			t.Fatalf("stream error: %v", ch.Err)
+		}
+	}
+
+	if got == nil {
+		t.Fatal("usage recorder was not called")
+	}
+	if got.InputTokens != 10 || got.OutputTokens != 5 || got.TotalTokens != 15 {
+		t.Errorf("usage = %+v, want {Input:10 Output:5 Total:15}", *got)
+	}
+}
+
+func TestUsageRecorderNotCalledWithoutUsage(t *testing.T) {
+	ctx := context.Background()
+	b := writeBot(t, "name: b\nsystem: s\n")
+
+	called := false
+	rt, err := New(ctx, b, stubLLM{}, WithUsageRecorder(func(Usage) { called = true }))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	for ch := range rt.HandlerFor("conv")(ctx, chat.Message{Text: "ping"}) {
+		_ = ch
+	}
+	if called {
+		t.Error("usage recorder should not fire when no response reports usage")
+	}
+}
+
+func TestAccumulateUsageTotalFallback(t *testing.T) {
+	var u Usage
+	ev := &session.Event{}
+	ev.UsageMetadata = &genai.GenerateContentResponseUsageMetadata{
+		PromptTokenCount: 8, CandidatesTokenCount: 2, // TotalTokenCount left 0
+	}
+	if !accumulateUsage(&u, ev) {
+		t.Fatal("accumulateUsage returned false for an event with usage")
+	}
+	if u.TotalTokens != 10 {
+		t.Errorf("TotalTokens = %d, want 10 (input+output fallback)", u.TotalTokens)
+	}
+}
 
 func TestBuildUserContentTextOnly(t *testing.T) {
 	c, err := buildUserContent(chat.Message{Text: "hi"})

@@ -40,13 +40,28 @@ type ToolCall struct {
 // parent level, so their invocation is recorded as a single tool call.
 type ToolRecorder func(ToolCall)
 
+// Usage is the token accounting for one turn, summed across every model call
+// the turn makes (including tool-loop calls). Counts are best-effort: only the
+// final, non-partial response of each model call carries usage, and some
+// providers omit it entirely.
+type Usage struct {
+	InputTokens  int
+	OutputTokens int
+	TotalTokens  int
+}
+
+// UsageRecorder is invoked once at the end of a turn with the turn's summed
+// token usage. It is not called when no model response reported usage metadata.
+type UsageRecorder func(Usage)
+
 // Option customizes Runtime construction. Pass zero or more to New.
 type Option func(*options)
 
 type options struct {
-	recorder ToolRecorder
-	resolver ModelResolver
-	senders  chat.SenderRegistry
+	recorder      ToolRecorder
+	usageRecorder UsageRecorder
+	resolver      ModelResolver
+	senders       chat.SenderRegistry
 }
 
 // WithToolRecorder attaches a callback that fires after every tool call on
@@ -54,6 +69,13 @@ type options struct {
 // (the callback cannot mutate args or results).
 func WithToolRecorder(fn ToolRecorder) Option {
 	return func(o *options) { o.recorder = fn }
+}
+
+// WithUsageRecorder attaches a callback that fires once per turn with the
+// summed token usage. It is not called when no model response reports usage
+// (e.g. providers that omit it on streaming responses).
+func WithUsageRecorder(fn UsageRecorder) Option {
+	return func(o *options) { o.usageRecorder = fn }
 }
 
 // WithSenderRegistry attaches a registry of transport senders. When set,
@@ -86,6 +108,8 @@ type Runtime struct {
 
 	stateless bool
 	turnSeq   atomic.Uint64
+
+	usageRecorder UsageRecorder
 
 	mcpProbes []mcpProbe
 }
@@ -124,12 +148,13 @@ func New(ctx context.Context, b *bot.Bot, llm adkmodel.LLM, opts ...Option) (*Ru
 	}
 
 	return &Runtime{
-		appName:   b.Name,
-		sessions:  sessions,
-		runner:    r,
-		known:     map[string]struct{}{},
-		stateless: b.Permissions.MemoryOrDefault() == bot.MemoryNone,
-		mcpProbes: bld.probes,
+		appName:       b.Name,
+		sessions:      sessions,
+		runner:        r,
+		known:         map[string]struct{}{},
+		stateless:     b.Permissions.MemoryOrDefault() == bot.MemoryNone,
+		usageRecorder: cfg.usageRecorder,
+		mcpProbes:     bld.probes,
 	}, nil
 }
 
@@ -440,15 +465,45 @@ func (r *Runtime) runTurn(ctx context.Context, convID string, userMsg chat.Messa
 	}
 
 	runCtx := tool.WithAttachments(ctx, userMsg.Attachments)
+	var usage Usage
+	var sawUsage bool
 	for ev, err := range r.runner.Run(runCtx, sessionID, sessionID, msg, agent.RunConfig{}) {
 		if err != nil {
 			emit(chat.Chunk{Err: err})
 			return
 		}
+		if accumulateUsage(&usage, ev) {
+			sawUsage = true
+		}
 		if !emitTextParts(ev, emit) {
 			return
 		}
 	}
+	if r.usageRecorder != nil && sawUsage {
+		r.usageRecorder(usage)
+	}
+}
+
+// accumulateUsage adds ev's token counts to usage when the event carries usage
+// metadata. Only the final, non-partial response of each model call does, so
+// summing across the turn yields the total across any tool-loop calls. Reports
+// whether usage was present; TotalTokens falls back to input+output when a
+// provider leaves it zero.
+func accumulateUsage(usage *Usage, ev *session.Event) bool {
+	if ev == nil || ev.UsageMetadata == nil {
+		return false
+	}
+	u := ev.UsageMetadata
+	in := int(u.PromptTokenCount)
+	out := int(u.CandidatesTokenCount)
+	total := int(u.TotalTokenCount)
+	if total == 0 {
+		total = in + out
+	}
+	usage.InputTokens += in
+	usage.OutputTokens += out
+	usage.TotalTokens += total
+	return true
 }
 
 // emitTextParts pushes every non-empty text part of ev's content through

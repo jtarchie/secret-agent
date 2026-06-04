@@ -523,9 +523,12 @@ The model is optional on the command line: if the bot YAML declares its own `mod
   "tool_calls": [
     { "name": "greet", "args": { "who": "Ada" }, "result": { "output": "Hello, Ada!" }, "error": "" }
   ],
+  "usage": { "input_tokens": 1234, "output_tokens": 567, "total_tokens": 1801 },
   "error": null
 }
 ```
+
+`usage` is the turn's token counts summed across every model call it made (including tool-loop calls). It is **best-effort**: it's `null` when the provider doesn't report usage (some OpenAI-compatible servers omit it on streaming responses; Anthropic always reports it).
 
 Examples:
 
