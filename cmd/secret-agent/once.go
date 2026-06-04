@@ -19,6 +19,7 @@ import (
 
 	"github.com/jtarchie/secret-agent/internal/bot"
 	"github.com/jtarchie/secret-agent/internal/chat"
+	"github.com/jtarchie/secret-agent/internal/mcpauth"
 	"github.com/jtarchie/secret-agent/internal/model"
 	"github.com/jtarchie/secret-agent/internal/runtime"
 	"github.com/jtarchie/secret-agent/internal/tool"
@@ -79,10 +80,15 @@ func (c *OnceCmd) Run() error {
 
 	rec, snapshot := newRecorder(logger, c.Verbose >= 1)
 	usageRec, usageSnapshot := newUsageRecorder()
+	mcpStore, err := mcpauth.Open()
+	if err != nil {
+		return fmt.Errorf("open mcp auth store: %w", err)
+	}
 	rt, err := runtime.New(ctx, b, res.defaultLLM,
 		runtime.WithModelResolver(res.resolver),
 		runtime.WithToolRecorder(rec),
 		runtime.WithUsageRecorder(usageRec),
+		runtime.WithMCPAuthStore(mcpStore),
 	)
 	if err != nil {
 		return fmt.Errorf("build runtime: %w", err)

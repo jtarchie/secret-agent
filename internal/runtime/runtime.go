@@ -20,6 +20,7 @@ import (
 	"github.com/jtarchie/secret-agent/internal/bot"
 	"github.com/jtarchie/secret-agent/internal/chat"
 	"github.com/jtarchie/secret-agent/internal/hook"
+	"github.com/jtarchie/secret-agent/internal/mcpauth"
 	"github.com/jtarchie/secret-agent/internal/tool"
 )
 
@@ -62,6 +63,7 @@ type options struct {
 	usageRecorder UsageRecorder
 	resolver      ModelResolver
 	senders       chat.SenderRegistry
+	mcpStore      *mcpauth.Store
 }
 
 // WithToolRecorder attaches a callback that fires after every tool call on
@@ -84,6 +86,14 @@ func WithUsageRecorder(fn UsageRecorder) Option {
 // messages via any configured transport.
 func WithSenderRegistry(reg chat.SenderRegistry) Option {
 	return func(o *options) { o.senders = reg }
+}
+
+// WithMCPAuthStore wires a token store into NewMCP so HTTP MCP servers that
+// require OAuth pick up credentials cached by `secret-agent mcp login`. When
+// unset, HTTP MCP servers run without an OAuth handler — fine for open
+// servers and ones authenticated via static headers.
+func WithMCPAuthStore(store *mcpauth.Store) Option {
+	return func(o *options) { o.mcpStore = store }
 }
 
 // ModelResolver returns the LLM to use for a given bot. Called once per bot
@@ -129,7 +139,7 @@ func New(ctx context.Context, b *bot.Bot, llm adkmodel.LLM, opts ...Option) (*Ru
 	}
 
 	_ = ctx // setup performs no I/O; reserved so callers can pass theirs without contextcheck false positives
-	bld := &builder{recorder: cfg.recorder, resolver: cfg.resolver, senders: cfg.senders}
+	bld := &builder{recorder: cfg.recorder, resolver: cfg.resolver, senders: cfg.senders, mcpStore: cfg.mcpStore}
 	//nolint:contextcheck // hook callbacks receive their own ctx from ADK at invocation; build-time wiring has no I/O
 	root, err := bld.buildAgent(b.Name, fmt.Sprintf("YAML-defined bot %q", b.Name), b, llm, true)
 	if err != nil {
@@ -165,6 +175,7 @@ type builder struct {
 	recorder ToolRecorder
 	resolver ModelResolver
 	senders  chat.SenderRegistry
+	mcpStore *mcpauth.Store
 }
 
 // buildAgent constructs an ADK llmagent for a bot, recursively wrapping each
@@ -231,11 +242,12 @@ func (bld *builder) resolveModel(b *bot.Bot, inherited adkmodel.LLM) (adkmodel.L
 }
 
 // buildToolsets instantiates each declared MCP toolset and records a
-// preflight probe for it.
+// preflight probe for it. The bot's name scopes any OAuth tokens picked up
+// from the auth store.
 func (bld *builder) buildToolsets(agentName string, b *bot.Bot) ([]adktool.Toolset, error) {
 	out := make([]adktool.Toolset, 0, len(b.MCP))
 	for _, m := range b.MCP {
-		ts, err := tool.NewMCP(m)
+		ts, err := tool.NewMCP(b.Name, m, bld.mcpStore)
 		if err != nil {
 			return nil, fmt.Errorf("mcp %q: %w", m.Name, err)
 		}

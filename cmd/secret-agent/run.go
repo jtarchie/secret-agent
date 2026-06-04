@@ -22,6 +22,7 @@ import (
 	slacktransport "github.com/jtarchie/secret-agent/internal/chat/slack"
 	"github.com/jtarchie/secret-agent/internal/config"
 	cronpkg "github.com/jtarchie/secret-agent/internal/cron"
+	"github.com/jtarchie/secret-agent/internal/mcpauth"
 	"github.com/jtarchie/secret-agent/internal/model"
 	"github.com/jtarchie/secret-agent/internal/router"
 	"github.com/jtarchie/secret-agent/internal/runtime"
@@ -82,8 +83,13 @@ func (c *RunCmd) Run() error {
 	}
 	senders := buildSenderRegistry(cfg, transports)
 
+	mcpStore, err := mcpauth.Open()
+	if err != nil {
+		return fmt.Errorf("open mcp auth store: %w", err)
+	}
+
 	scheduler := cronpkg.New(logger, senders)
-	routes, err := buildRoutes(ctx, topBots, llm, resolver, senders, scheduler, c.SkipPreflight, c.MCPPreflightTimeout)
+	routes, err := buildRoutes(ctx, topBots, llm, resolver, senders, scheduler, c.SkipPreflight, c.MCPPreflightTimeout, mcpStore)
 	if err != nil {
 		return err
 	}
@@ -185,12 +191,14 @@ func buildRoutes(
 	scheduler *cronpkg.Scheduler,
 	skipPreflight bool,
 	mcpPreflightTimeout time.Duration,
+	mcpStore *mcpauth.Store,
 ) ([]router.Route, error) {
 	routes := make([]router.Route, 0, len(topBots))
 	for _, b := range topBots {
 		rt, err := runtime.New(ctx, b, llm,
 			runtime.WithModelResolver(resolver),
 			runtime.WithSenderRegistry(senders),
+			runtime.WithMCPAuthStore(mcpStore),
 		)
 		if err != nil {
 			return nil, fmt.Errorf("runtime for bot %q: %w", b.Name, err)

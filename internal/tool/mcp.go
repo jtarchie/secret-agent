@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 
+	"github.com/modelcontextprotocol/go-sdk/auth"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/session"
@@ -16,13 +17,19 @@ import (
 	"google.golang.org/genai"
 
 	"github.com/jtarchie/secret-agent/internal/bot"
+	"github.com/jtarchie/secret-agent/internal/mcpauth"
 )
 
 // NewMCP builds an ADK Toolset that connects to the MCP server described by
 // m. The transport is selected by which field of m is set: Command dispatches
 // a stdio subprocess, URL connects over streamable HTTP. Connection is lazy —
 // the server is not dialed until the agent asks for tools for the first time.
-func NewMCP(m bot.MCPServer) (adktool.Toolset, error) {
+//
+// botName scopes any OAuth tokens persisted in store to a specific bot; an
+// HTTP MCP server that returns 401 will surface an error pointing the user
+// at `secret-agent mcp login`. When store is nil, no OAuth handler is wired
+// (callers that don't need OAuth — tests, command transports — can pass nil).
+func NewMCP(botName string, m bot.MCPServer, store *mcpauth.Store) (adktool.Toolset, error) {
 	var transport mcp.Transport
 
 	switch {
@@ -34,10 +41,14 @@ func NewMCP(m bot.MCPServer) (adktool.Toolset, error) {
 		transport = &mcp.CommandTransport{Command: cmd}
 
 	case m.URL != "":
-		transport = &mcp.StreamableClientTransport{
+		st := &mcp.StreamableClientTransport{
 			Endpoint:   m.URL,
 			HTTPClient: newHeaderHTTPClient(m.Headers),
 		}
+		if store != nil {
+			st.OAuthHandler = oauthHandlerFor(store, botName, m.Name)
+		}
+		transport = st
 
 	default:
 		return nil, fmt.Errorf("mcp %q: no transport (command or url) set", m.Name)
@@ -56,6 +67,13 @@ func NewMCP(m bot.MCPServer) (adktool.Toolset, error) {
 		ts = adktool.FilterToolset(ts, adktool.AllowedToolsPredicate(m.ToolFilter))
 	}
 	return ts, nil
+}
+
+// oauthHandlerFor returns the OAuth handler the StreamableClientTransport
+// will consult. Always a RuntimeHandler in production paths — the `mcp login`
+// subcommand uses mcpauth.Login directly rather than going through NewMCP.
+func oauthHandlerFor(store *mcpauth.Store, botName, mcpName string) auth.OAuthHandler {
+	return mcpauth.NewRuntimeHandler(store, botName, mcpName)
 }
 
 // envSlice converts a map into the KEY=VALUE form expected by exec.Cmd.Env.

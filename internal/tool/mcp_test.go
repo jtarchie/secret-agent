@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -14,14 +16,15 @@ import (
 	"google.golang.org/adk/tool/mcptoolset"
 
 	"github.com/jtarchie/secret-agent/internal/bot"
+	"github.com/jtarchie/secret-agent/internal/mcpauth"
 )
 
 func TestNewMCPStdio(t *testing.T) {
-	ts, err := NewMCP(bot.MCPServer{
+	ts, err := NewMCP("bot", bot.MCPServer{
 		Name:    "fs",
 		Command: "echo",
 		Args:    []string{"hello"},
-	})
+	}, nil)
 	if err != nil {
 		t.Fatalf("NewMCP: %v", err)
 	}
@@ -31,13 +34,13 @@ func TestNewMCPStdio(t *testing.T) {
 }
 
 func TestNewMCPURL(t *testing.T) {
-	ts, err := NewMCP(bot.MCPServer{
+	ts, err := NewMCP("bot", bot.MCPServer{
 		Name: "maps",
 		URL:  "https://example.com/mcp",
 		Headers: map[string]string{
 			"Authorization": "Bearer token",
 		},
-	})
+	}, nil)
 	if err != nil {
 		t.Fatalf("NewMCP: %v", err)
 	}
@@ -47,7 +50,7 @@ func TestNewMCPURL(t *testing.T) {
 }
 
 func TestNewMCPNoTransport(t *testing.T) {
-	_, err := NewMCP(bot.MCPServer{Name: "empty"})
+	_, err := NewMCP("bot", bot.MCPServer{Name: "empty"}, nil)
 	if err == nil {
 		t.Fatal("expected error when no transport set")
 	}
@@ -143,6 +146,41 @@ func TestPreflightMCPTimeout(t *testing.T) {
 	}
 	if elapsed < 150*time.Millisecond/2 {
 		t.Errorf("preflight returned too early (%s)", elapsed)
+	}
+}
+
+// TestPreflightMCP401WithoutTokenSurfacesLoginHint exercises the runtime
+// OAuth path: an HTTP MCP server that returns 401, no persisted token, and
+// the RuntimeHandler wired up via NewMCP. The preflight error should hint
+// the user at `secret-agent mcp login`.
+func TestPreflightMCP401WithoutTokenSurfacesLoginHint(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("WWW-Authenticate", `Bearer realm="mcp"`)
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+
+	store, err := mcpauth.OpenAt(filepath.Join(t.TempDir(), "tokens.json"))
+	if err != nil {
+		t.Fatalf("OpenAt: %v", err)
+	}
+
+	ts, err := NewMCP("mybot", bot.MCPServer{
+		Name: "stub",
+		URL:  srv.URL + "/mcp",
+	}, store)
+	if err != nil {
+		t.Fatalf("NewMCP: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	err = PreflightMCP(ctx, ts)
+	if err == nil {
+		t.Fatal("expected preflight error on 401")
+	}
+	if !strings.Contains(err.Error(), "mcp login") {
+		t.Errorf("preflight error should hint `mcp login`; got %v", err)
 	}
 }
 

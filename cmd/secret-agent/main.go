@@ -12,6 +12,7 @@ type CLI struct {
 	Run          RunCmd          `cmd:"" help:"run bots over configured transports"`
 	Once         OnceCmd         `cmd:"" help:"run one non-interactive agent turn from a single YAML and print the reply"`
 	Eval         EvalCmd         `cmd:"" help:"run a bot's tests: block as an offline eval"`
+	Mcp          McpCmd          `cmd:"" help:"manage credentials for HTTP MCP servers (login, etc.)"`
 	SignalLink   SignalLinkCmd   `cmd:"" help:"QR-link a Signal secondary device"                                         name:"signal-link"`
 	ListBuiltins ListBuiltinsCmd `cmd:"" help:"list built-in sub-agents embedded in the binary"                           name:"list-builtins"`
 }
